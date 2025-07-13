@@ -3,10 +3,11 @@ from datasets import load_dataset
 
 # ds = load_dataset("nkasmanoff/retail_detector_flattened")
 ds = load_dataset("moondream/waste_detection")
+centered_coords = False
 
 
 class ObjectDetectionDataset:
-    def __init__(self, dataset, centered_coords=True):
+    def __init__(self, dataset, centered_coords=centered_coords):
         self.dataset = dataset
         self.centered_coords = centered_coords
 

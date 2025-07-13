@@ -117,7 +117,6 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
 
     if BATCH_SIZE > 0:
         final_loss = total_loss / BATCH_SIZE
-        print(f"Final loss: {final_loss.item()}")
         final_loss.backward()
         optimizer.step()
 
@@ -160,7 +159,9 @@ def main():
             train_loss, _ = train_step(
                 experience, model, optimizer, train_ds, start_idx
             )
-            train_step(experience, model, optimizer, train_ds, start_idx)
+            train_loss, _ = train_step(
+                experience, model, optimizer, train_ds, start_idx
+            )
             num_steps += 1
             print(f"Step {num_steps} complete")
 
@@ -174,11 +175,7 @@ def main():
                         model.state_dict(),
                         f"gpro_model_{num_steps}.safetensors",
                     )
-                    # save_model(model, output_model_path)
             print(f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}")
-
-
-#    save_model(model, output_model_path)
 
 
 if __name__ == "__main__":

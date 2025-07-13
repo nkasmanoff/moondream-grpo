@@ -124,7 +124,7 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
     return final_loss.item(), new_predictions
 
 
-def validate(model, val_ds, max_samples=10):
+def validate(model, val_ds, max_samples=15):
     model.eval()
     total_rewards = 0
     for i in range(max_samples):

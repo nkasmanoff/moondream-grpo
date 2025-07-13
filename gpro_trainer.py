@@ -12,9 +12,10 @@ from safetensors.torch import save_file
 
 NUM_EPOCHS = 1
 BATCH_SIZE = 2
-NUM_ROLLOUTS = 4
-LEARNING_RATE = 5e-5
-EVAL_INTERVAL = 1
+NUM_ROLLOUTS = 6
+LEARNING_RATE = 1e-4
+TRAIN_STEPS = 2
+EVAL_INTERVAL = 4
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
@@ -156,12 +157,10 @@ def main():
             with torch.no_grad():
                 experience, _ = collect_experience(train_ds, model, start_idx)
             # take 2 steps for each batch
-            train_loss, _ = train_step(
-                experience, model, optimizer, train_ds, start_idx
-            )
-            train_loss, _ = train_step(
-                experience, model, optimizer, train_ds, start_idx
-            )
+            for _ in range(TRAIN_STEPS):
+                train_loss, _ = train_step(
+                    experience, model, optimizer, train_ds, start_idx
+                )
             num_steps += 1
             print(f"Step {num_steps} complete")
 

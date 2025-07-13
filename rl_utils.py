@@ -14,29 +14,25 @@ def calculate_overlap(predicted_box, true_box):
     )
 
 
-def calculate_reward(trajectory_detections, sample):
-    # For each trajectory, calculate the reward for the object detection model
+def calculate_single_reward(trajectory_detection, sample):
+    trajectory_reward = float(0)
+    predicted_boxes = trajectory_detection["objects"]
+    true_boxes = sample[2]
+    if len(predicted_boxes) != len(true_boxes):
+        trajectory_reward -= 1
+    else:
+        trajectory_reward += 1
+    for predicted_box, true_box in zip(predicted_boxes, true_boxes):
+        overlap = calculate_overlap(predicted_box, true_box)
+        trajectory_reward += overlap
+    return trajectory_reward
 
-    # Things like: same number of objects
-    # overlap in bounding box corresponding
 
+def calculate_rewards(trajectory_detections, sample):
     total_rewards = []
-    for i in range(len(trajectory_detections)):
-        trajectory_reward = float(0)
-        predicted_boxes = trajectory_detections[i]["objects"]
-        true_boxes = sample[2]
-        if len(predicted_boxes) != len(true_boxes):
-            trajectory_reward -= 1
-        else:
-            trajectory_reward += 1
-        for j in range(
-            min(len(predicted_boxes), len(true_boxes))
-        ):  # loop through the smaller of the two
-            predicted_box = predicted_boxes[j]
-            true_box = true_boxes[j]
-            overlap = calculate_overlap(predicted_box, true_box)
-            trajectory_reward += overlap
-        total_rewards.append(trajectory_reward)
+    for trajectory_detection in trajectory_detections:
+        reward = calculate_single_reward(trajectory_detection, sample)
+        total_rewards.append(reward)
 
     return total_rewards
 

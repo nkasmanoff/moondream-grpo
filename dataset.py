@@ -1,12 +1,14 @@
 from datasets import load_dataset
 
 
+# ds = load_dataset("nkasmanoff/retail_detector_flattened")
 ds = load_dataset("moondream/waste_detection")
 
 
 class ObjectDetectionDataset:
-    def __init__(self, dataset):
+    def __init__(self, dataset, centered_coords=True):
         self.dataset = dataset
+        self.centered_coords = centered_coords
 
     def __len__(self):
         return len(self.dataset)
@@ -19,6 +21,9 @@ class ObjectDetectionDataset:
         boxes = []
         for box in sample["boxes"]:
             x, y, w, h = box
+            if self.centered_coords:
+                x = x + w / 2
+                y = y + h / 2
             boxes.append(
                 {
                     "x_min": x - w / 2,

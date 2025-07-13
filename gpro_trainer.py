@@ -1,39 +1,38 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from PIL import Image
 import numpy as np
 import torch
 from torch.optim import AdamW
-from visualization_utils import plot_sample, plot_prediction
 from moondream_functions import detect, detect_grad
 from dataset import load_object_detection_dataset
-from moondream_cache import setup_caches
-from rl_utils import calculate_reward
+from rl_utils import calculate_rewards, calculate_single_reward
 from moondream import MoondreamModel, MoondreamConfig
 from safetensors.torch import load_file
 from rl_utils import calculate_gpro_loss
+from safetensors.torch import save_file
 
 
-BATCH_SIZE = 1
-NUM_ROLLOUTS = 6
+NUM_EPOCHS = 1
+BATCH_SIZE = 2
+NUM_ROLLOUTS = 4
+LEARNING_RATE = 5e-5
+EVAL_INTERVAL = 1
 safetensors_path = "model.safetensors"
-
-
+device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
 
 
-def collect_experience(train_ds, model):
+def collect_experience(train_ds, model, start_idx):
     experience = []
     for i in range(BATCH_SIZE):
-        sample = train_ds[11]
-        #    hf_model.encode_image(sample[0], None); # initalize the  kv_cache for this sample
+        sample = train_ds[start_idx + i]
 
         trajectory_detections = []
 
-        for i in range(NUM_ROLLOUTS):
+        for _ in range(NUM_ROLLOUTS):
             detections = detect(model, sample[0], sample[1], None, temperature=1)
             trajectory_detections.append(detections)
 
-        rewards = calculate_reward(trajectory_detections, sample)
+        rewards = calculate_rewards(trajectory_detections, sample)
+
         advantages = rewards - np.mean(rewards)
 
         advantages = advantages / np.std(advantages)
@@ -42,8 +41,8 @@ def collect_experience(train_ds, model):
         advantages = advantages.unsqueeze(1)
 
         group_experience = []
-        for i, traj in enumerate(trajectory_detections):
-            predictions = traj["objects"]
+        for trajectory in trajectory_detections:
+            predictions = trajectory["objects"]
             advantage = advantages[i]
             logprobs = []
             for obj in predictions:
@@ -58,16 +57,16 @@ def collect_experience(train_ds, model):
             group_experience.append({"logprobs": logprobs, "advantage": advantage})
         experience.extend(group_experience)
 
-    return experience
+    return experience, trajectory_detections
 
 
-def train_step(experience, model, optimizer, train_ds):
+def train_step(experience, model, optimizer, train_ds, start_idx):
 
     optimizer.zero_grad()
     total_loss = 0
 
     for i in range(BATCH_SIZE):
-        sample = train_ds[11]
+        sample = train_ds[start_idx + i]
 
         new_predictions = detect_grad(model, sample[0], sample[1], None, temperature=0)
         new_logprobs = torch.stack(new_predictions["out_logprobs"]).reshape(
@@ -85,10 +84,9 @@ def train_step(experience, model, optimizer, train_ds):
             device=model.device,
         )
 
-        for j in range(len(trajectory_experience)):
-
+        for j, trajectory in enumerate(trajectory_experience):
+            group_experience_logprobs = trajectory["logprobs"]
             # todo add padding and some kind of masking during gradient calculation
-            group_experience_logprobs = trajectory_experience[j]["logprobs"]
             orig_len = len(group_experience_logprobs)
             # pad right with 0s to match new_logprobs.shape[-1]
             if orig_len < new_logprobs.shape[-1]:
@@ -118,32 +116,69 @@ def train_step(experience, model, optimizer, train_ds):
         total_loss += gpro_loss
 
     if BATCH_SIZE > 0:
-        print(total_loss)
         final_loss = total_loss / BATCH_SIZE
+        print(f"Final loss: {final_loss.item()}")
         final_loss.backward()
         optimizer.step()
 
+    return final_loss.item(), new_predictions
+
+
+def validate(model, val_ds, max_samples=10):
+    model.eval()
+    total_rewards = 0
+    for i in range(max_samples):
+        sample = val_ds[i]
+        detections = detect(model, sample[0], sample[1], None, temperature=0)
+        reward = calculate_single_reward(detections, sample)
+        total_rewards += reward
+    model.train()
+    return total_rewards / max_samples
+
 
 def main():
+    num_steps = 0
     model = MoondreamModel(config=MoondreamConfig)
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
-    model.to("mps")
+    model.to(device)
 
-    optimizer = AdamW(model.region.parameters(), lr=1e-4)
+    optimizer = AdamW(model.region.parameters(), lr=LEARNING_RATE)
 
     num_params = sum(p.numel() for p in model.region.parameters())
     print(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
+    val_ds = load_object_detection_dataset("test")
+    best_validation_score = float("-inf")
+    for epoch in range(NUM_EPOCHS):
+        num_samples = len(train_ds)
+        for start_idx in range(0, num_samples, BATCH_SIZE):
+            with torch.no_grad():
+                experience, _ = collect_experience(train_ds, model, start_idx)
+            # take 2 steps for each batch
+            train_loss, _ = train_step(
+                experience, model, optimizer, train_ds, start_idx
+            )
+            train_step(experience, model, optimizer, train_ds, start_idx)
+            num_steps += 1
+            print(f"Step {num_steps} complete")
 
-    print("Collecting experience")
-    with torch.no_grad():
-        experience = collect_experience(train_ds, model)
-    print("Training step")
-    train_step(experience, model, optimizer, train_ds)
-    print("Training step 2")
-    train_step(experience, model, optimizer, train_ds)
+            if num_steps % EVAL_INTERVAL == 0:
+                print(f"Evaluating at step {num_steps}")
+                validation_score = validate(model, val_ds, max_samples=2)
+                print(f"Validation score: {round(validation_score, 4)}")
+                if validation_score > best_validation_score:
+                    best_validation_score = validation_score
+                    save_file(
+                        model.state_dict(),
+                        f"gpro_model_{num_steps}.safetensors",
+                    )
+                    # save_model(model, output_model_path)
+            print(f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}")
+
+
+#    save_model(model, output_model_path)
 
 
 if __name__ == "__main__":

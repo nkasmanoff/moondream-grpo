@@ -72,6 +72,8 @@ class KVCache(nn.Module):
         )
 
     def update(self, pos_ids, k, v):
+        self.k_cache.detach_()
+        self.v_cache.detach_()
         kout, vout = self.k_cache, self.v_cache
         kout[:, :, pos_ids, :] = k
         vout[:, :, pos_ids, :] = v
@@ -129,10 +131,12 @@ class MoondreamModel(nn.Module):
             }
         )
         self.region.coord_features = nn.Parameter(
-            torch.empty(config.region.coord_feat_dim // 2, 1, dtype=dtype).T
+            torch.empty(
+                config.region.coord_feat_dim // 2, 1, dtype=dtype
+            ).T.contiguous()
         )
         self.region.size_features = nn.Parameter(
-            torch.empty(config.region.size_feat_dim // 2, 2, dtype=dtype).T
+            torch.empty(config.region.size_feat_dim // 2, 2, dtype=dtype).T.contiguous()
         )
 
         attn_mask = torch.tril(

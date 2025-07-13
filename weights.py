@@ -209,7 +209,7 @@ def _load_weights(get_tensor: Callable[[str], torch.Tensor], model: nn.Module) -
 
     # Region Model
     model.region.coord_features.data.copy_(
-        get_tensor("region_model.coordinate_features.weight").T
+        get_tensor("region_model.coordinate_features.weight").T.contiguous()
     )
     model.region["coord_encoder"].weight.data.copy_(
         get_tensor("region_model.coordinate_encoder.weight")
@@ -232,7 +232,7 @@ def _load_weights(get_tensor: Callable[[str], torch.Tensor], model: nn.Module) -
     )
 
     model.region.size_features.data.copy_(
-        get_tensor("region_model.size_features.weight").T
+        get_tensor("region_model.size_features.weight").T.contiguous()
     )
     model.region["size_encoder"].weight.data.copy_(
         get_tensor("region_model.size_encoder.weight")

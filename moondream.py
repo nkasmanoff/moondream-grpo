@@ -72,11 +72,14 @@ class KVCache(nn.Module):
         )
 
     def update(self, pos_ids, k, v):
-        kout = self.k_cache.clone()
-        vout = self.v_cache.clone()
-        kout[:, :, pos_ids, :] = k
-        vout[:, :, pos_ids, :] = v
-        return kout, vout
+        k_out = self.k_cache.clone()
+        v_out = self.v_cache.clone()
+        k_out[:, :, pos_ids, :] = k
+        v_out[:, :, pos_ids, :] = v
+        with torch.no_grad():
+            self.k_cache.copy_(k_out)
+            self.v_cache.copy_(v_out)
+        return k_out, v_out
 
 
 class MoondreamModel(nn.Module):

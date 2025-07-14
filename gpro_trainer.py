@@ -138,11 +138,10 @@ def validate(model, val_ds, max_samples=15):
 
 def main():
     num_steps = 0
-    model = MoondreamModel(config=MoondreamConfig, setup_caches=False)
+    model = MoondreamModel(config=MoondreamConfig, setup_caches=True)
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
     model.to(device)
-    model._setup_caches()
     optimizer = AdamW(model.region.parameters(), lr=LEARNING_RATE)
 
     num_params = sum(p.numel() for p in model.region.parameters())

@@ -13,11 +13,11 @@ import logging
 
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 1
-NUM_ROLLOUTS = 3
-LEARNING_RATE = 3e-5
+BATCH_SIZE = 8
+NUM_ROLLOUTS = 8
+LEARNING_RATE = 5e-5
 TRAIN_STEPS = 1
-EVAL_INTERVAL = 2
+EVAL_INTERVAL = 1
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
@@ -161,7 +161,13 @@ def main():
 
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
-    optimizer = AdamW(model.region.parameters(), lr=LEARNING_RATE)
+    optimizer = AdamW(
+        [{"params": model.region.parameters()}],
+        lr=LEARNING_RATE,
+        betas=(0.9, 0.95),
+        eps=1e-6,
+        weight_decay=0.01
+    )
 
     num_params = sum(p.numel() for p in model.region.parameters())
     logging.info(f"Number of parameters: {num_params:,}")

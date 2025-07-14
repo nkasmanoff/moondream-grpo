@@ -35,7 +35,7 @@ def calculate_single_reward(trajectory_detection, sample):
 def calculate_rewards(trajectory_detections, sample):
     total_rewards = []
     for trajectory_detection in trajectory_detections:
-        reward = calculate_detection_reward(trajectory_detection, sample)
+        reward = calculate_single_reward(trajectory_detection, sample)
         total_rewards.append(reward)
 
     return total_rewards

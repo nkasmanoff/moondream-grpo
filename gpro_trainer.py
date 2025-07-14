@@ -18,6 +18,7 @@ NUM_ROLLOUTS = 8
 LEARNING_RATE = 5e-5
 TRAIN_STEPS = 1
 EVAL_INTERVAL = 1
+VALIDATION_SAMPLES = 15
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
@@ -49,17 +50,17 @@ def collect_experience(train_ds, model, start_idx):
         group_experience = []
         for trajectory in trajectory_detections:
             predictions = trajectory["objects"]
-            advantage = advantages[i]
+            advantage = advantages[i].detach().cpu()
             logprobs = []
             for obj in predictions:
-                x_logprob = obj["x_logprob"]
-                y_logprob = obj["y_logprob"]
-                w_logprob = obj["w_logprob"]
-                h_logprob = obj["h_logprob"]
+                x_logprob = obj["x_logprob"].detach().cpu()
+                y_logprob = obj["y_logprob"].detach().cpu()
+                w_logprob = obj["w_logprob"].detach().cpu()
+                h_logprob = obj["h_logprob"].detach().cpu()
                 logprobs.extend([x_logprob, y_logprob, w_logprob, h_logprob])
 
             # convert logits list to tensor
-            logprobs = torch.tensor(logprobs, dtype=torch.float32).to(model.device)
+            logprobs = torch.tensor(logprobs, dtype=torch.float32)
             group_experience.append({"logprobs": logprobs, "advantage": advantage})
         experience.extend(group_experience)
 
@@ -91,7 +92,7 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
         )
 
         for j, trajectory in enumerate(trajectory_experience):
-            group_experience_logprobs = trajectory["logprobs"]
+            group_experience_logprobs = trajectory["logprobs"].to(model.device)
             # todo add padding and some kind of masking during gradient calculation
             orig_len = len(group_experience_logprobs)
             # pad right with 0s to match new_logprobs.shape[-1]
@@ -111,7 +112,9 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
                     : new_logprobs.shape[-1]
                 ]  # truncate
             old_logprobs_stack.append(group_experience_logprobs)
-            advantages_stack.append(trajectory_experience[j]["advantage"])
+            advantages_stack.append(
+                trajectory_experience[j]["advantage"].to(model.device)
+            )
 
         advantages = torch.stack(advantages_stack)
         old_logprobs = torch.stack(old_logprobs_stack)
@@ -129,7 +132,7 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
     return final_loss.item(), new_predictions
 
 
-def validate(model, val_ds, max_samples=15):
+def validate(model, val_ds, max_samples=VALIDATION_SAMPLES):
     model.eval()
     total_rewards = 0
     for i in range(max_samples):
@@ -138,6 +141,16 @@ def validate(model, val_ds, max_samples=15):
         reward = calculate_single_reward(detections, sample)
         total_rewards += reward
     model.train()
+    return total_rewards / max_samples
+
+
+def validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES):
+    total_rewards = 0
+    for i in range(max_samples):
+        sample = val_ds[i]
+        detections = {"objects": sample[2]}
+        reward = calculate_single_reward(detections, sample)
+        total_rewards += reward
     return total_rewards / max_samples
 
 
@@ -166,7 +179,7 @@ def main():
         lr=LEARNING_RATE,
         betas=(0.9, 0.95),
         eps=1e-6,
-        weight_decay=0.01
+        weight_decay=0.01,
     )
 
     num_params = sum(p.numel() for p in model.region.parameters())
@@ -175,6 +188,13 @@ def main():
     train_ds = load_object_detection_dataset("train")
     val_ds = load_object_detection_dataset("test")
     best_validation_score = float("-inf")
+    gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
+    logging.info(f"GT validation score: {round(gt_validation_score, 4)}")
+    wandb.log({"gt_validation_score": gt_validation_score})
+    initial_validation_score = validate(model, val_ds, max_samples=VALIDATION_SAMPLES)
+    logging.info(f"Initial validation score: {round(initial_validation_score, 4)}")
+    wandb.log({"initial_validation_score": initial_validation_score})
+
     for epoch in range(NUM_EPOCHS):
         num_samples = len(train_ds)
         for start_idx in range(0, num_samples, BATCH_SIZE):
@@ -192,7 +212,9 @@ def main():
 
             if num_steps % EVAL_INTERVAL == 0:
                 logging.info(f"Evaluating at step {num_steps}")
-                validation_score = validate(model, val_ds, max_samples=2)
+                validation_score = validate(
+                    model, val_ds, max_samples=VALIDATION_SAMPLES
+                )
                 logging.info(f"Validation score: {round(validation_score, 4)}")
                 wandb.log({"validation_score": validation_score}, step=num_steps)
                 if validation_score > best_validation_score:

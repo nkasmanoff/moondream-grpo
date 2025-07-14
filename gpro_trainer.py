@@ -8,13 +8,15 @@ from moondream import MoondreamModel, MoondreamConfig
 from safetensors.torch import load_file
 from rl_utils import calculate_gpro_loss
 from safetensors.torch import save_file
+import wandb
+import logging
 
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 4
-NUM_ROLLOUTS = 6
-LEARNING_RATE = 3e-4
-TRAIN_STEPS = 2
+BATCH_SIZE = 1
+NUM_ROLLOUTS = 3
+LEARNING_RATE = 3e-5
+TRAIN_STEPS = 1
 EVAL_INTERVAL = 2
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
@@ -30,7 +32,7 @@ def collect_experience(train_ds, model, start_idx):
 
         for _ in range(NUM_ROLLOUTS):
             detections = detect(model, sample[0], sample[1], None, temperature=1)
-            if len(detections['objects']) == 0:
+            if len(detections["objects"]) == 0:
                 # if no objects detected, skip this trajectory
                 continue
             trajectory_detections.append(detections)
@@ -140,6 +142,19 @@ def validate(model, val_ds, max_samples=15):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+    wandb.init(
+        project="moondream-gpro",
+        config={
+            "learning_rate": LEARNING_RATE,
+            "epochs": NUM_EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "num_rollouts": NUM_ROLLOUTS,
+            "train_steps_per_batch": TRAIN_STEPS,
+        },
+    )
     num_steps = 0
     model = MoondreamModel(config=MoondreamConfig, setup_caches=True)
     model.to(device)
@@ -149,7 +164,7 @@ def main():
     optimizer = AdamW(model.region.parameters(), lr=LEARNING_RATE)
 
     num_params = sum(p.numel() for p in model.region.parameters())
-    print(f"Number of parameters: {num_params:,}")
+    logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
     val_ds = load_object_detection_dataset("test")
@@ -165,19 +180,31 @@ def main():
                     experience, model, optimizer, train_ds, start_idx
                 )
             num_steps += 1
-            print(f"Step {num_steps} complete")
+            logging.info(f"Step {num_steps} complete")
+
+            wandb.log({"train_loss": train_loss, "epoch": epoch}, step=num_steps)
 
             if num_steps % EVAL_INTERVAL == 0:
-                print(f"Evaluating at step {num_steps}")
+                logging.info(f"Evaluating at step {num_steps}")
                 validation_score = validate(model, val_ds, max_samples=2)
-                print(f"Validation score: {round(validation_score, 4)}")
+                logging.info(f"Validation score: {round(validation_score, 4)}")
+                wandb.log({"validation_score": validation_score}, step=num_steps)
                 if validation_score > best_validation_score:
                     best_validation_score = validation_score
+                    model_path = f"gpro_model_{num_steps}.safetensors"
                     save_file(
                         model.state_dict(),
-                        f"gpro_model_{num_steps}.safetensors",
+                        model_path,
                     )
-            print(f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}")
+                    #                    artifact = wandb.Artifact(f"gpro-model-{num_steps}", type="model")
+                    #                    artifact.add_file(model_path)
+                    #                    wandb.log_artifact(artifact)
+                    logging.info(f"Saved model to {model_path}")
+            logging.info(
+                f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"
+            )
+
+    wandb.finish()
 
 
 if __name__ == "__main__":

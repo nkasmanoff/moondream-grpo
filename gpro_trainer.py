@@ -13,7 +13,7 @@ from safetensors.torch import save_file
 NUM_EPOCHS = 1
 BATCH_SIZE = 4
 NUM_ROLLOUTS = 6
-LEARNING_RATE = 5e-5
+LEARNING_RATE = 3e-4
 TRAIN_STEPS = 2
 EVAL_INTERVAL = 2
 safetensors_path = "model.safetensors"

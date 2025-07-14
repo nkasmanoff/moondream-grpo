@@ -72,9 +72,8 @@ class KVCache(nn.Module):
         )
 
     def update(self, pos_ids, k, v):
-        self.k_cache.detach_()
-        self.v_cache.detach_()
-        kout, vout = self.k_cache, self.v_cache
+        kout = self.k_cache.clone()
+        vout = self.v_cache.clone()
         kout[:, :, pos_ids, :] = k
         vout[:, :, pos_ids, :] = v
         return kout, vout

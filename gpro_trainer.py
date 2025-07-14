@@ -30,6 +30,9 @@ def collect_experience(train_ds, model, start_idx):
 
         for _ in range(NUM_ROLLOUTS):
             detections = detect(model, sample[0], sample[1], None, temperature=1)
+            if len(detections['objects']) == 0:
+                # if no objects detected, skip this trajectory
+                continue
             trajectory_detections.append(detections)
 
         rewards = calculate_rewards(trajectory_detections, sample)

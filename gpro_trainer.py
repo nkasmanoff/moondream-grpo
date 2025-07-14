@@ -11,11 +11,11 @@ from safetensors.torch import save_file
 
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 2
+BATCH_SIZE = 4
 NUM_ROLLOUTS = 6
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-5
 TRAIN_STEPS = 2
-EVAL_INTERVAL = 4
+EVAL_INTERVAL = 2
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
@@ -139,9 +139,10 @@ def validate(model, val_ds, max_samples=15):
 def main():
     num_steps = 0
     model = MoondreamModel(config=MoondreamConfig, setup_caches=True)
+    model.to(device)
+
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
-    model.to(device)
     optimizer = AdamW(model.region.parameters(), lr=LEARNING_RATE)
 
     num_params = sum(p.numel() for p in model.region.parameters())

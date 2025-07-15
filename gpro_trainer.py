@@ -12,6 +12,11 @@ import wandb
 import logging
 from visualization_utils import plot_prediction
 import os
+import math
+
+# set. VIPS_WARNING=0 in environment
+os.environ["VIPS_WARNING"] = "0"
+os.environ["VIPS_INFO"] = "0"
 
 NUM_EPOCHS = 1
 BATCH_SIZE = 2
@@ -19,11 +24,17 @@ NUM_ROLLOUTS = 4
 LEARNING_RATE = 1e-4
 TRAIN_STEPS = 1
 EVAL_INTERVAL = 1
-VALIDATION_SAMPLES = 15
+VALIDATION_SAMPLES = 30
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
 
+def lr_schedule(step, max_steps):
+    x = step / max_steps
+    if x < 0.1:
+        return 0.1 * LR + 0.9 * LR * x / 0.1
+    else:
+        return 0.1 * LR + 0.9 * LR * (1 + math.cos(math.pi * (x - 0.1))) / 2
 
 def collect_experience(train_ds, model, start_idx):
     experience = []
@@ -126,12 +137,12 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
             new_logprobs, old_logprobs, advantages, attention_mask
         )
         loss = gpro_loss / BATCH_SIZE
-        loss.backward()
-        total_loss += gpro_loss.item()
+        total_loss += loss
 
+    total_loss.backward()
     optimizer.step()
 
-    return total_loss / BATCH_SIZE
+    return total_loss.item() / BATCH_SIZE
 
 
 def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
@@ -148,7 +159,7 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
         # upload to wandb
         images.append(wandb.Image(f"predictions/prediction_{i}.png"))
         total_rewards += reward
-    wandb.log({"predictions": images}, step=step)
+    wandb.log({"predictions": images[-10:]}, step=step)
     model.train()
     return total_rewards / max_samples
 

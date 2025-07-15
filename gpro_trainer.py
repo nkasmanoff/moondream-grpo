@@ -76,6 +76,9 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
         sample = train_ds[start_idx + i]
 
         new_predictions = detect_grad(model, sample[0], sample[1], None, temperature=0)
+        if len(new_predictions["out_logprobs"]) == 0:
+            # if no objects detected, skip this sample
+            continue
         new_logprobs = torch.stack(new_predictions["out_logprobs"]).reshape(
             -1, len(new_predictions["out_logprobs"])
         )

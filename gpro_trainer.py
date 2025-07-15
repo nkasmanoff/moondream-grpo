@@ -10,12 +10,13 @@ from rl_utils import calculate_gpro_loss
 from safetensors.torch import save_file
 import wandb
 import logging
-
+from visualization_utils import plot_prediction
+import os
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 8
-NUM_ROLLOUTS = 8
-LEARNING_RATE = 5e-5
+BATCH_SIZE = 2
+NUM_ROLLOUTS = 4
+LEARNING_RATE = 1e-4
 TRAIN_STEPS = 1
 EVAL_INTERVAL = 1
 VALIDATION_SAMPLES = 15
@@ -32,7 +33,7 @@ def collect_experience(train_ds, model, start_idx):
         trajectory_detections = []
 
         for _ in range(NUM_ROLLOUTS):
-            detections = detect(model, sample[0], sample[1], None, temperature=1)
+            detections = detect(model, sample[0], sample[1], None, temperature=2.5)
             if len(detections["objects"]) == 0:
                 # if no objects detected, skip this trajectory
                 continue
@@ -133,14 +134,21 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
     return total_loss / BATCH_SIZE
 
 
-def validate(model, val_ds, max_samples=VALIDATION_SAMPLES):
+def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
     model.eval()
     total_rewards = 0
+    images = []
     for i in range(max_samples):
         sample = val_ds[i]
         detections = detect(model, sample[0], sample[1], None, temperature=0)
         reward = calculate_single_reward(detections, sample)
+        # plot sample
+        fig = plot_prediction(detections, sample)
+        fig.savefig(f"predictions/prediction_{i}.png")
+        # upload to wandb
+        images.append(wandb.Image(f"predictions/prediction_{i}.png"))
         total_rewards += reward
+    wandb.log({"predictions": images}, step=step)
     model.train()
     return total_rewards / max_samples
 
@@ -159,6 +167,7 @@ def main():
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
+    os.makedirs("predictions", exist_ok=True)
     wandb.init(
         project="moondream-gpro",
         config={
@@ -167,10 +176,11 @@ def main():
             "batch_size": BATCH_SIZE,
             "num_rollouts": NUM_ROLLOUTS,
             "train_steps_per_batch": TRAIN_STEPS,
+            "validation_samples": VALIDATION_SAMPLES,
         },
     )
     num_steps = 0
-    model = MoondreamModel(config=MoondreamConfig, setup_caches=True)
+    model = MoondreamModel(config=MoondreamConfig(), setup_caches=True)
     model.to(device)
 
     state_dict = load_file(safetensors_path)
@@ -178,9 +188,6 @@ def main():
     optimizer = AdamW(
         [{"params": model.region.parameters()}],
         lr=LEARNING_RATE,
-        betas=(0.9, 0.95),
-        eps=1e-6,
-        weight_decay=0.01,
     )
 
     num_params = sum(p.numel() for p in model.region.parameters())
@@ -191,10 +198,18 @@ def main():
     best_validation_score = float("-inf")
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
     logging.info(f"GT validation score: {round(gt_validation_score, 4)}")
-    wandb.log({"gt_validation_score": gt_validation_score})
-    initial_validation_score = validate(model, val_ds, max_samples=VALIDATION_SAMPLES)
+    initial_validation_score = validate(
+        model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
+    )
     logging.info(f"Initial validation score: {round(initial_validation_score, 4)}")
-    wandb.log({"initial_validation_score": initial_validation_score})
+
+    wandb.log(
+        {
+            "gt_validation_score": gt_validation_score,
+            "initial_validation_score": initial_validation_score,
+        },
+        step=num_steps,
+    )
 
     for epoch in range(NUM_EPOCHS):
         num_samples = len(train_ds)
@@ -211,7 +226,7 @@ def main():
             if num_steps % EVAL_INTERVAL == 0:
                 logging.info(f"Evaluating at step {num_steps}")
                 validation_score = validate(
-                    model, val_ds, max_samples=VALIDATION_SAMPLES
+                    model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
                 )
                 logging.info(f"Validation score: {round(validation_score, 4)}")
                 wandb.log({"validation_score": validation_score}, step=num_steps)

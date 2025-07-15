@@ -68,7 +68,6 @@ def collect_experience(train_ds, model, start_idx):
 
 
 def train_step(experience, model, optimizer, train_ds, start_idx):
-
     optimizer.zero_grad()
     total_loss = 0
 
@@ -125,14 +124,13 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
         gpro_loss = calculate_gpro_loss(
             new_logprobs, old_logprobs, advantages, attention_mask
         )
-        total_loss += gpro_loss
+        loss = gpro_loss / BATCH_SIZE
+        loss.backward()
+        total_loss += gpro_loss.item()
 
-    if BATCH_SIZE > 0:
-        final_loss = total_loss / BATCH_SIZE
-        final_loss.backward()
-        optimizer.step()
+    optimizer.step()
 
-    return final_loss.item(), new_predictions
+    return total_loss / BATCH_SIZE
 
 
 def validate(model, val_ds, max_samples=VALIDATION_SAMPLES):
@@ -203,11 +201,8 @@ def main():
         for start_idx in range(0, num_samples, BATCH_SIZE):
             with torch.no_grad():
                 experience, _ = collect_experience(train_ds, model, start_idx)
-            # take 2 steps for each batch
-            for _ in range(TRAIN_STEPS):
-                train_loss, _ = train_step(
-                    experience, model, optimizer, train_ds, start_idx
-                )
+
+            train_loss = train_step(experience, model, optimizer, train_ds, start_idx)
             num_steps += 1
             logging.info(f"Step {num_steps} complete")
 

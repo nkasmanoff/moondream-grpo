@@ -1,6 +1,6 @@
 import torch
 from typing import Tuple, List
-
+import numpy as np
 
 Box = Tuple[float, float, float, float]  # (x1, y1, x2, y2) – in proportion form
 
@@ -17,6 +17,20 @@ def calculate_overlap(predicted_box, true_box):
         * (predicted_box["y_max"] - predicted_box["y_min"])
     )
 
+def calculate_object_center(predicted_box, true_box):
+    # finds the distance between the centers of the predicted and true boxes
+    predicted_center_x = (predicted_box["x_min"] + predicted_box["x_max"]) / 2
+    predicted_center_y = (predicted_box["y_min"] + predicted_box["y_max"]) / 2
+    true_center_x = (true_box["x_min"] + true_box["x_max"]) / 2
+    true_center_y = (true_box["y_min"] + true_box["y_max"]) / 2
+
+    distance = np.sqrt((predicted_center_x - true_center_x) ** 2 + (predicted_center_y - true_center_y) ** 2)
+    # return 1 / distance but normalized to 0-1
+    if distance == 0:
+        return 1.0
+
+    return 1 - distance
+
 
 def calculate_single_reward(trajectory_detection, sample):
     trajectory_reward = float(0)
@@ -28,7 +42,8 @@ def calculate_single_reward(trajectory_detection, sample):
         trajectory_reward += 1
     for predicted_box, true_box in zip(predicted_boxes, true_boxes):
         overlap = calculate_overlap(predicted_box, true_box)
-        trajectory_reward += overlap
+        center_distance = calculate_object_center(predicted_box, true_box)
+        trajectory_reward += overlap + center_distance
     return trajectory_reward
 
 

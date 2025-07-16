@@ -19,12 +19,12 @@ os.environ["VIPS_WARNING"] = "0"
 os.environ["VIPS_INFO"] = "0"
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 2
+BATCH_SIZE = 1
 NUM_ROLLOUTS = 4
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-5
 TRAIN_STEPS = 1
 EVAL_INTERVAL = 1
-VALIDATION_SAMPLES = 30
+VALIDATION_SAMPLES = 10
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
@@ -139,6 +139,12 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
         loss = gpro_loss / BATCH_SIZE
         total_loss += loss
 
+    if isinstance(total_loss, int):
+        logging.error("Loss is an integer, skipping step")
+        return 0
+    if isinstance(total_loss, torch.Tensor) and torch.isnan(total_loss).any():
+        logging.error("Loss is NaN, skipping step")
+        return 0
     total_loss.backward()
     optimizer.step()
 
@@ -205,7 +211,7 @@ def main():
     logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
-    val_ds = load_object_detection_dataset("test")
+    val_ds = load_object_detection_dataset("val")
     best_validation_score = float("-inf")
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
     logging.info(f"GT validation score: {round(gt_validation_score, 4)}")

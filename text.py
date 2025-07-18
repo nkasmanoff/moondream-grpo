@@ -148,7 +148,7 @@ def text_decoder(
             block.attn,
             freqs_cis=w.freqs_cis,
             kv_cache=block.kv_cache,
-            attn_mask=attn_mask,
+            attn_mask=attn_mask.clone(),
             n_heads=config.n_heads,
             n_kv_heads=config.n_kv_heads,
             position_ids=position_ids,

@@ -1,2 +1,4 @@
 **.safetensors
 **__pycache__**
+**wandb**
+**predictions/

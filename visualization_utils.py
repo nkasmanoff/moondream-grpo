@@ -30,7 +30,8 @@ def plot_prediction(predictions, sample):
     label = sample[1]
     boxes = sample[2]
     predicted_boxes = predictions["objects"]
-    plt.imshow(image)
+    fig, ax = plt.subplots()
+    ax.imshow(image)
     img_width, img_height = image.size
 
     # for box in boxes:
@@ -45,9 +46,11 @@ def plot_prediction(predictions, sample):
             box["x_max"] * img_width,
             box["y_max"] * img_height,
         )
-        plt.plot(
+        ax.plot(
             [x_min, x_max, x_max, x_min, x_min], [y_min, y_min, y_max, y_max, y_min]
         )
-        plt.text(x_min, y_min, label)
+        ax.text(x_min, y_min, label)
 
-    plt.show()
+    # return the plot as a figure
+    plt.savefig("prediction.png")
+    return fig

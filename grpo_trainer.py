@@ -24,7 +24,8 @@ NUM_ROLLOUTS = 2
 LEARNING_RATE = 5e-5
 TRAIN_STEPS = 1
 EVAL_INTERVAL = 10
-VALIDATION_SAMPLES = 27
+VALIDATION_SAMPLES = 27 * 9
+MAX_PLOT_SAMPLES = 9
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
@@ -169,10 +170,10 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
             detections = detect(model, sample[0], sample[1], None, temperature=0)
             reward = calculate_single_reward(detections, sample)
             # plot sample
-            fig = plot_prediction(detections, sample)
-            fig.savefig(f"predictions/prediction_{i}.png")
-            # upload to wandb
-            images.append(wandb.Image(f"predictions/prediction_{i}.png"))
+            if i < MAX_PLOT_SAMPLES:
+                fig = plot_prediction(detections, sample)
+                fig.savefig(f"predictions/prediction_{i}.png")
+                images.append(wandb.Image(f"predictions/prediction_{i}.png"))
             total_rewards += reward
     wandb.log({"predictions": images[-10:]}, step=step)
     model.train()

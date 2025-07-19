@@ -84,7 +84,7 @@ def collect_experience(train_ds, model, start_idx):
     return experience, trajectory_detections
 
 
-def train_step(experience, model, optimizer, train_ds, start_idx):
+def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
     optimizer.zero_grad()
     total_loss = 0
 
@@ -152,6 +152,9 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
         return 0
     total_loss.backward()
     optimizer.step()
+    lr_val = lr_schedule(num_steps, NUM_EPOCHS * len(train_ds) / BATCH_SIZE)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr_val
 
     return total_loss.item() / BATCH_SIZE
 
@@ -242,11 +245,17 @@ def main():
             with torch.no_grad():
                 experience, _ = collect_experience(train_ds, model, start_idx)
 
-            train_loss = train_step(experience, model, optimizer, train_ds, start_idx)
+            train_loss = train_step(
+                experience, model, optimizer, train_ds, start_idx, num_steps
+            )
             num_steps += 1
             logging.info(f"Step {num_steps} complete")
+            lr_val = lr_schedule(num_steps, NUM_EPOCHS * len(train_ds) / BATCH_SIZE)
 
-            wandb.log({"train_loss": train_loss, "epoch": epoch}, step=num_steps)
+            wandb.log(
+                {"train_loss": train_loss, "epoch": epoch, "lr": lr_val},
+                step=num_steps,
+            )
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

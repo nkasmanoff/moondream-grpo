@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch.optim import AdamW
 from moondream_functions import detect, detect_grad
-from sku_datatset import load_object_detection_dataset
+from sku_dataset import load_object_detection_dataset
 from rl_utils import calculate_rewards, calculate_single_reward
 from moondream import MoondreamModel, MoondreamConfig
 from safetensors.torch import load_file
@@ -19,12 +19,12 @@ os.environ["VIPS_WARNING"] = "0"
 os.environ["VIPS_INFO"] = "0"
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 2
-NUM_ROLLOUTS = 4
+BATCH_SIZE = 1
+NUM_ROLLOUTS = 2
 LEARNING_RATE = 5e-5
 TRAIN_STEPS = 1
-EVAL_INTERVAL = 5
-VALIDATION_SAMPLES = 9
+EVAL_INTERVAL = 10
+VALIDATION_SAMPLES = 27
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 torch.autograd.set_detect_anomaly(True)
@@ -194,7 +194,7 @@ def main():
     )
     os.makedirs("predictions", exist_ok=True)
     wandb.init(
-        project="moondream-gpro",
+        project="moondream-sku-detection",
         config={
             "learning_rate": LEARNING_RATE,
             "epochs": NUM_EPOCHS,

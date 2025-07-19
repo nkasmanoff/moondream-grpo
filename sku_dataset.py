@@ -29,7 +29,9 @@ def load_sku_dataset(split):
             objects.append({'x_min': x1, 'y_min': y1, 'x_max': x2, 'y_max': y2 })
 
         sku_110k_dataset.append({'image_name': g.iloc[0]['image_name'], 'image': image, 'objects': objects, 'label': label})
-
+    # skip any where more than 50 objects
+    sku_110k_dataset = [sample for sample in sku_110k_dataset if len(sample['objects']) <= 100]
+    print("Loaded SKU-110K dataset with {} samples".format(len(sku_110k_dataset)))
     return sku_110k_dataset
 
 

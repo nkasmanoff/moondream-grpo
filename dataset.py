@@ -1,7 +1,7 @@
 from datasets import load_dataset
 
 
-ds_name = "nkasmanoff/retail_detector_flattened"  # or "moondream/waste_detection"
+ds_name =  "moondream/waste_detection" #"nkasmanoff/retail_detector_flattened"  # or "moondream/waste_detection"
 
 #ds = load_dataset("moondream/waste_detection")
 centered_coords = True if 'nkasmanoff' in ds_name else False
@@ -62,5 +62,6 @@ class ObjectDetectionDataset:
 
 
 def load_object_detection_dataset(split):
-    
+    if split == "val":
+        split = "test"
     return ObjectDetectionDataset(split, ds_name, centered_coords=centered_coords)

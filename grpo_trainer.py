@@ -56,6 +56,10 @@ def collect_experience(train_ds, model, start_idx):
                 continue
             trajectory_detections.append(detections)
 
+        if not trajectory_detections:
+            experience.append([])
+            continue
+
         rewards = calculate_rewards(trajectory_detections, sample)
 
         advantages = rewards - np.mean(rewards)
@@ -66,9 +70,9 @@ def collect_experience(train_ds, model, start_idx):
         advantages = advantages.unsqueeze(1)
 
         group_experience = []
-        for trajectory in trajectory_detections:
+        for j, trajectory in enumerate(trajectory_detections):
             predictions = trajectory["objects"]
-            advantage = advantages[i].detach().cpu()
+            advantage = advantages[j].detach().cpu()
             logprobs = []
             for obj in predictions:
                 x_logprob = obj["x_logprob"].detach().cpu()
@@ -80,7 +84,7 @@ def collect_experience(train_ds, model, start_idx):
             # convert logits list to tensor
             logprobs = torch.tensor(logprobs, dtype=torch.float32)
             group_experience.append({"logprobs": logprobs, "advantage": advantage})
-        experience.extend(group_experience)
+        experience.append(group_experience)
 
     return experience, trajectory_detections
 
@@ -103,7 +107,9 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
         old_logprobs_stack = []  # the prior log probs for the same corresponding sample
         advantages_stack = []
         # truncate experience to only be for this sample
-        trajectory_experience = experience[i * NUM_ROLLOUTS : (i + 1) * NUM_ROLLOUTS]
+        trajectory_experience = experience[i]
+        if not trajectory_experience:
+            continue
 
         attention_mask = torch.ones(
             len(trajectory_experience),
@@ -135,6 +141,9 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
             advantages_stack.append(
                 trajectory_experience[j]["advantage"].to(model.device)
             )
+
+        if not advantages_stack:
+            continue
 
         advantages = torch.stack(advantages_stack)
         old_logprobs = torch.stack(old_logprobs_stack)

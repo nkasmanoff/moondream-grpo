@@ -13,6 +13,10 @@ import logging
 from visualization_utils import plot_prediction
 import os
 import math
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+from grpo_utils import synchronize_metrics
 
 # set. VIPS_WARNING=0 in environment
 os.environ["VIPS_WARNING"] = "0"
@@ -27,8 +31,24 @@ EVAL_INTERVAL = 10
 VALIDATION_SAMPLES = 27 * 9
 MAX_PLOT_SAMPLES = 9
 safetensors_path = "model.safetensors"
-device = "cuda" if torch.cuda.is_available() else "mps"
-torch.autograd.set_detect_anomaly(True)
+
+
+def setup_distributed():
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        dist.init_process_group("nccl")
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        return True
+    return False
+
+
+def cleanup_distributed():
+    dist.destroy_process_group()
+
+
+def is_main_process():
+    if dist.is_initialized():
+        return dist.get_rank() == 0
+    return True
 
 
 def lr_schedule(step, max_steps):
@@ -160,7 +180,7 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
     return total_loss.item() / BATCH_SIZE
 
 
-def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
+def validate(model, val_ds, step, device, max_samples=VALIDATION_SAMPLES):
     model.eval()
     total_rewards = 0
     images = []
@@ -170,79 +190,104 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
             detections = detect(model, sample[0], sample[1], None, temperature=0)
             reward = calculate_single_reward(detections, sample)
             # plot sample
-            if i < MAX_PLOT_SAMPLES:
+            if is_main_process() and i < MAX_PLOT_SAMPLES:
                 fig = plot_prediction(detections, sample)
                 fig.savefig(f"predictions/prediction_{i}.png")
                 images.append(wandb.Image(f"predictions/prediction_{i}.png"))
             total_rewards += reward
-    wandb.log({"predictions": images[-10:]}, step=step)
+
+    total_rewards = synchronize_metrics([total_rewards], device)[0]
+    num_samples_synced = synchronize_metrics([max_samples], device)[0]
+    if is_main_process():
+        wandb.log({"predictions": images[-10:]}, step=step)
     model.train()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    return total_rewards / max_samples
+    return total_rewards / num_samples_synced
 
 
-def validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES):
+def validate_with_gt(val_ds, device, max_samples=VALIDATION_SAMPLES):
     total_rewards = 0
     for i in range(max_samples):
         sample = val_ds[i]
         detections = {"objects": sample[2]}
         reward = calculate_single_reward(detections, sample)
         total_rewards += reward
-    return total_rewards / max_samples
+
+    total_rewards = synchronize_metrics([total_rewards], device)[0]
+    num_samples_synced = synchronize_metrics([max_samples], device)[0]
+    return total_rewards / num_samples_synced
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
-    os.makedirs("predictions", exist_ok=True)
-    wandb.init(
-        project="moondream-sku-detection",
-        config={
-            "learning_rate": LEARNING_RATE,
-            "epochs": NUM_EPOCHS,
-            "batch_size": BATCH_SIZE,
-            "num_rollouts": NUM_ROLLOUTS,
-            "train_steps_per_batch": TRAIN_STEPS,
-            "validation_samples": VALIDATION_SAMPLES,
-        },
-    )
+    is_distributed = setup_distributed()
+    device = torch.device(f"cuda:{os.environ['LOCAL_RANK']}") if is_distributed else "mps"
+
+    if is_main_process():
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+        )
+        os.makedirs("predictions", exist_ok=True)
+        wandb.init(
+            project="moondream-sku-detection",
+            config={
+                "learning_rate": LEARNING_RATE,
+                "epochs": NUM_EPOCHS,
+                "batch_size": BATCH_SIZE,
+                "num_rollouts": NUM_ROLLOUTS,
+                "train_steps_per_batch": TRAIN_STEPS,
+                "validation_samples": VALIDATION_SAMPLES,
+            },
+        )
     num_steps = 0
     model = MoondreamModel(config=MoondreamConfig(), setup_caches=True)
     model.to(device)
+    if is_distributed:
+        model = DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])])
 
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
     optimizer = AdamW(
-        [{"params": model.region.parameters()}],
+        [{"params": model.module.region.parameters() if is_distributed else model.region.parameters()}],
         lr=LEARNING_RATE,
     )
 
-    num_params = sum(p.numel() for p in model.region.parameters())
-    logging.info(f"Number of parameters: {num_params:,}")
+    num_params = sum(p.numel() for p in (model.module.region.parameters() if is_distributed else model.region.parameters()))
+    if is_main_process():
+        logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
     val_ds = load_object_detection_dataset("val")
-    best_validation_score = float("-inf")
-    gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
-    logging.info(f"GT validation score: {round(gt_validation_score, 4)}")
-    initial_validation_score = validate(
-        model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
-    )
-    logging.info(f"Initial validation score: {round(initial_validation_score, 4)}")
 
-    wandb.log(
-        {
-            "gt_validation_score": gt_validation_score,
-            "initial_validation_score": initial_validation_score,
-        },
-        step=num_steps,
+    train_sampler = DistributedSampler(train_ds) if is_distributed else None
+    train_loader = DataLoader(
+        train_ds, batch_size=BATCH_SIZE, sampler=train_sampler, shuffle=(train_sampler is None)
     )
+
+    best_validation_score = float("-inf")
+    gt_validation_score = validate_with_gt(val_ds, device, max_samples=VALIDATION_SAMPLES)
+    if is_main_process():
+        logging.info(f"GT validation score: {round(gt_validation_score, 4)}")
+    initial_validation_score = validate(
+        model, val_ds, step=num_steps, device=device, max_samples=VALIDATION_SAMPLES
+    )
+    if is_main_process():
+        logging.info(f"Initial validation score: {round(initial_validation_score, 4)}")
+
+        wandb.log(
+            {
+                "gt_validation_score": gt_validation_score,
+                "initial_validation_score": initial_validation_score,
+            },
+            step=num_steps,
+        )
 
     for epoch in range(NUM_EPOCHS):
-        num_samples = len(train_ds)
-        for start_idx in range(0, num_samples, BATCH_SIZE):
+        if is_distributed:
+            train_sampler.set_epoch(epoch)
+
+        for i, batch in enumerate(train_loader):
+            start_idx = i * BATCH_SIZE
             with torch.no_grad():
                 experience, _ = collect_experience(train_ds, model, start_idx)
 
@@ -250,43 +295,48 @@ def main():
                 experience, model, optimizer, train_ds, start_idx, num_steps
             )
             num_steps += 1
-            logging.info(f"Step {num_steps} complete")
+            if is_main_process():
+                logging.info(f"Step {num_steps} complete")
             lr_val = lr_schedule(num_steps, NUM_EPOCHS * len(train_ds) / BATCH_SIZE)
 
-            wandb.log(
-                {"train_loss": train_loss, "epoch": epoch, "lr": lr_val},
-                step=num_steps,
-            )
+            if is_main_process():
+                wandb.log(
+                    {"train_loss": train_loss, "epoch": epoch, "lr": lr_val},
+                    step=num_steps,
+                )
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
             if num_steps % EVAL_INTERVAL == 0:
-                logging.info(f"Evaluating at step {num_steps}")
+                if is_main_process():
+                    logging.info(f"Evaluating at step {num_steps}")
                 validation_score = validate(
-                    model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
+                    model, val_ds, step=num_steps, device=device, max_samples=VALIDATION_SAMPLES
                 )
-                logging.info(f"Validation score: {round(validation_score, 4)}")
-                wandb.log({"validation_score": validation_score}, step=num_steps)
-                if validation_score > best_validation_score:
-                    best_validation_score = validation_score
-                    if not os.path.exists("models"):
-                        os.makedirs("models")
+                if is_main_process():
+                    logging.info(f"Validation score: {round(validation_score, 4)}")
+                    wandb.log({"validation_score": validation_score}, step=num_steps)
+                    if validation_score > best_validation_score:
+                        best_validation_score = validation_score
+                        if not os.path.exists("models"):
+                            os.makedirs("models")
 
-                    model_path = f"models/grpo_model_{num_steps}.safetensors"
-                    save_file(
-                        model.state_dict(),
-                        model_path,
-                    )
-                    #                    artifact = wandb.Artifact(f"grpo-model-{num_steps}", type="model")
-                    #                    artifact.add_file(model_path)
-                    #                    wandb.log_artifact(artifact)
-                    logging.info(f"Saved model to {model_path}")
-            logging.info(
-                f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"
-            )
+                        model_path = f"models/grpo_model_{num_steps}.safetensors"
+                        save_file(
+                            model.module.state_dict() if is_distributed else model.state_dict(),
+                            model_path,
+                        )
+                        logging.info(f"Saved model to {model_path}")
+            if is_main_process():
+                logging.info(
+                    f"Epoch {epoch} batch {start_idx // BATCH_SIZE} loss: {round(train_loss, 4)}"
+                )
 
-    wandb.finish()
+    if is_main_process():
+        wandb.finish()
+    if is_distributed:
+        cleanup_distributed()
 
 
 if __name__ == "__main__":

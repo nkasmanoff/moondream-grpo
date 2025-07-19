@@ -19,16 +19,16 @@ os.environ["VIPS_WARNING"] = "0"
 os.environ["VIPS_INFO"] = "0"
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 1
-NUM_ROLLOUTS = 2
-LEARNING_RATE = 5e-5
+BATCH_SIZE = 8
+NUM_ROLLOUTS = 8
+LEARNING_RATE = 1e-4
 TRAIN_STEPS = 1
 EVAL_INTERVAL = 10
-VALIDATION_SAMPLES = 27 * 9
-MAX_PLOT_SAMPLES = 9
+VALIDATION_SAMPLES = 100
+MAX_PLOT_SAMPLES = 3
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
-torch.autograd.set_detect_anomaly(True)
+
 
 
 def lr_schedule(step, max_steps):
@@ -50,7 +50,7 @@ def collect_experience(train_ds, model, start_idx):
         trajectory_detections = []
 
         for _ in range(NUM_ROLLOUTS):
-            detections = detect(model, sample[0], sample[1], None, temperature=2.5)
+            detections = detect(model, sample[0], sample[1], None, temperature=1.0)
             if len(detections["objects"]) == 0:
                 # if no objects detected, skip this trajectory
                 continue

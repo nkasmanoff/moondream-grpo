@@ -500,6 +500,7 @@ def detect_grad(
     settings: Optional[ObjectSamplingSettings] = None,
     temperature: float = 0.0,
 ):
+    model._setup_caches()
     if model.config.tokenizer.templates["detect"] is None:
         raise NotImplementedError("Model does not support object detection.")
 

@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch.optim import AdamW
 from moondream_functions import detect, detect_grad
-from sku_dataset import load_object_detection_dataset
+from dataset import load_object_detection_dataset
 from rl_utils import calculate_rewards, calculate_single_reward
 from moondream import MoondreamModel, MoondreamConfig
 from safetensors.torch import load_file

@@ -6,7 +6,7 @@ from sku_dataset import load_object_detection_dataset
 from rl_utils import calculate_rewards, calculate_single_reward
 from moondream import MoondreamModel, MoondreamConfig
 from safetensors.torch import load_file
-from rl_utils import calculate_gpro_loss
+from rl_utils import calculate_grpo_loss
 from safetensors.torch import save_file
 import wandb
 import logging
@@ -138,10 +138,10 @@ def train_step(experience, model, optimizer, train_ds, start_idx):
         advantages = torch.stack(advantages_stack)
         old_logprobs = torch.stack(old_logprobs_stack)
 
-        gpro_loss = calculate_gpro_loss(
+        grpo_loss = calculate_grpo_loss(
             new_logprobs, old_logprobs, advantages, attention_mask
         )
-        loss = gpro_loss / BATCH_SIZE
+        loss = grpo_loss / BATCH_SIZE
         total_loss += loss
 
     if isinstance(total_loss, int):
@@ -263,12 +263,12 @@ def main():
                     if not os.path.exists("models"):
                         os.makedirs("models")
 
-                    model_path = f"models/gpro_model_{num_steps}.safetensors"
+                    model_path = f"models/grpo_model_{num_steps}.safetensors"
                     save_file(
                         model.state_dict(),
                         model_path,
                     )
-                    #                    artifact = wandb.Artifact(f"gpro-model-{num_steps}", type="model")
+                    #                    artifact = wandb.Artifact(f"grpo-model-{num_steps}", type="model")
                     #                    artifact.add_file(model_path)
                     #                    wandb.log_artifact(artifact)
                     logging.info(f"Saved model to {model_path}")

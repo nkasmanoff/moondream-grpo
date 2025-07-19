@@ -17,6 +17,7 @@ def calculate_overlap(predicted_box, true_box):
         * (predicted_box["y_max"] - predicted_box["y_min"])
     )
 
+
 def calculate_object_center(predicted_box, true_box):
     # finds the distance between the centers of the predicted and true boxes
     predicted_center_x = (predicted_box["x_min"] + predicted_box["x_max"]) / 2
@@ -24,7 +25,10 @@ def calculate_object_center(predicted_box, true_box):
     true_center_x = (true_box["x_min"] + true_box["x_max"]) / 2
     true_center_y = (true_box["y_min"] + true_box["y_max"]) / 2
 
-    distance = np.sqrt((predicted_center_x - true_center_x) ** 2 + (predicted_center_y - true_center_y) ** 2)
+    distance = np.sqrt(
+        (predicted_center_x - true_center_x) ** 2
+        + (predicted_center_y - true_center_y) ** 2
+    )
     # return 1 / distance but normalized to 0-1
     if distance == 0:
         return 1.0
@@ -56,7 +60,7 @@ def calculate_rewards(trajectory_detections, sample):
     return total_rewards
 
 
-def calculate_gpro_loss(
+def calculate_grpo_loss(
     new_logprobs, old_logprobs, advantages, attention_mask, clip_epsilon=0.2
 ):
     importance_sampling_ratio = torch.exp(new_logprobs - old_logprobs)
@@ -71,8 +75,8 @@ def calculate_gpro_loss(
 
     # gpro loss is to take the sum where attention mask is 1, set to 0 otherwise
 
-    gpro_loss = (loss * attention_mask).mean()
-    return gpro_loss
+    grpo_loss = (loss * attention_mask).mean()
+    return grpo_loss
 
 
 def iou(a: Box, b: Box) -> float:

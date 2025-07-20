@@ -18,19 +18,20 @@ import math
 os.environ["VIPS_WARNING"] = "0"
 os.environ["VIPS_INFO"] = "0"
 
-NUM_EPOCHS = 1
+NUM_EPOCHS = 64
 BATCH_SIZE = 1
-NUM_ROLLOUTS = 4
-LEARNING_RATE = 1e-4
+NUM_ROLLOUTS = 6
+LEARNING_RATE = 5e-5
 TRAIN_STEPS = 1
-EVAL_INTERVAL = 10
-VALIDATION_SAMPLES = 10
-MAX_PLOT_SAMPLES = 3
+
+EVAL_INTERVAL = 1
+VALIDATION_SAMPLES = 1
+MAX_PLOT_SAMPLES = 1
 safetensors_path = "model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 
-def lr_schedule(step, max_steps, constant=True):
+def lr_schedule(step, max_steps, constant=False):
     if constant:
         return LEARNING_RATE
     x = step / max_steps
@@ -225,15 +226,15 @@ def main():
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
     optimizer = AdamW(
-        [{"params": model.region.parameters()}],
+        [{"params": model.parameters()}],
         lr=LEARNING_RATE,
     )
 
-    num_params = sum(p.numel() for p in model.region.parameters())
+    num_params = sum(p.numel() for p in model.parameters())
     logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
-    val_ds = load_object_detection_dataset("val")
+    val_ds = load_object_detection_dataset("train")
     best_validation_score = float("-inf")
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
     logging.info(f"GT validation score: {round(gt_validation_score, 4)}")
@@ -295,6 +296,7 @@ def main():
             logging.info(
                 f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"
             )
+            break
 
     wandb.finish()
 

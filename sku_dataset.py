@@ -8,7 +8,16 @@ root_dir = "/teamspace/studios/this_studio/SKU110K_fixed/"
 
 def load_sku_dataset(split):
     df = pd.read_csv(f"{root_dir}annotations/annotations_{split}.csv", header=None)
-    columns = ["image_name", "x1", "y1", "x2", "y2", "class", "image_width", "image_height" ]
+    columns = [
+        "image_name",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "class",
+        "image_width",
+        "image_height",
+    ]
     df.columns = columns
     sku_110k_dataset = []
 
@@ -26,11 +35,20 @@ def load_sku_dataset(split):
             x2 = x2 / img_width
             y2 = y2 / img_height
 
-            objects.append({'x_min': x1, 'y_min': y1, 'x_max': x2, 'y_max': y2 })
+            objects.append({"x_min": x1, "y_min": y1, "x_max": x2, "y_max": y2})
 
-        sku_110k_dataset.append({'image_name': g.iloc[0]['image_name'], 'image': image, 'objects': objects, 'label': label})
+        sku_110k_dataset.append(
+            {
+                "image_name": g.iloc[0]["image_name"],
+                "image": image,
+                "objects": objects,
+                "label": label,
+            }
+        )
     # skip any where more than 50 objects
-    sku_110k_dataset = [sample for sample in sku_110k_dataset if len(sample['objects']) <= 100]
+    sku_110k_dataset = [
+        sample for sample in sku_110k_dataset if len(sample["objects"]) <= 100
+    ]
     print("Loaded SKU-110K dataset with {} samples".format(len(sku_110k_dataset)))
     return sku_110k_dataset
 
@@ -52,7 +70,6 @@ class SKUDetectionDataset(Dataset):
 
         # Extract the image, query, and bounding boxes
         return image, label, objects
-
 
 
 def load_object_detection_dataset(split):

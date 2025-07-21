@@ -102,6 +102,44 @@ class WasteDetection(Dataset):
         }
 
 
+class RefCocoDetection(Dataset):
+    def __init__(self, split: str = "train"):
+        self.dataset: datasets.Dataset = datasets.load_dataset(
+            "lmms-lab/RefCOCO", split="val" if split == "train" else "test"
+        )
+        self.dataset = self.dataset.shuffle(seed=111)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        row = self.dataset[idx]
+        image = row["image"]
+        labels = row["answer"]
+        boxes = [row["bbox"]]
+
+        flat_boxes = []
+        class_names = []
+        for label, box in zip(labels, boxes):
+            x, y, w, h = box
+            x = x / image.width
+            y = y / image.height
+            w = w / image.width
+            h = h / image.height
+            flat_boxes.append([x, y, w, h])
+            class_names.append(label)
+
+        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float16)
+        image_id = torch.tensor([idx], dtype=torch.int64)
+
+        return {
+            "image": image,
+            "boxes": flat_boxes,
+            "class_names": class_names,
+            "image_id": image_id,
+        }
+
+
 def main():
     if torch.cuda.is_available():
         torch.set_default_device("cuda")

@@ -52,5 +52,4 @@ def plot_prediction(predictions, sample):
         ax.text(x_min, y_min, label)
 
     # return the plot as a figure
-    plt.savefig("prediction.png")
     return fig

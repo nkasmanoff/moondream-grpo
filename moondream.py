@@ -50,7 +50,7 @@ ObjectSamplingSettings = TypedDict(
 DEFAULT_MAX_TOKENS = 768
 DEFAULT_TEMPERATURE = 0.5
 DEFAULT_TOP_P = 0.3
-DEFAULT_MAX_OBJECTS = 100
+DEFAULT_MAX_OBJECTS = 25
 
 
 @dataclass(frozen=True)

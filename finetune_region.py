@@ -6,13 +6,13 @@ from safetensors.torch import save_file
 import datasets
 
 from tqdm import tqdm
-from bitsandbytes.optim import AdamW
+from torch.optim import AdamW
 import wandb
-
-from ..torch.weights import load_weights_into_model
-from ..torch.moondream import MoondreamModel, MoondreamConfig, text_encoder
-from ..torch.text import _produce_hidden
-from ..torch.region import (
+from safetensors.torch import load_file
+from weights import load_weights_into_model
+from moondream import MoondreamModel, MoondreamConfig, text_encoder
+from text import _produce_hidden
+from region import (
     decode_coordinate,
     decode_size,
     encode_coordinate,
@@ -21,10 +21,11 @@ from ..torch.region import (
 
 
 # This is a intended to be a basic starting point. Your optimal hyperparams and data may be different.
-MODEL_PATH = ""
+MODEL_PATH = "model.safetensors"
 LR = 1e-5
 EPOCHS = 1
 GRAD_ACCUM_STEPS = 128
+device = "cuda" if torch.cuda.is_available() else "mps"
 
 
 def lr_schedule(step, max_steps):
@@ -141,11 +142,6 @@ class RefCocoDetection(Dataset):
 
 
 def main():
-    if torch.cuda.is_available():
-        torch.set_default_device("cuda")
-    elif torch.backends.mps.is_available():
-        torch.set_default_device("mps")
-
     wandb.init(
         project="moondream-ft",
         config={
@@ -155,16 +151,14 @@ def main():
         },
     )
 
-    config = MoondreamConfig()
-    model = MoondreamModel(config)
-    load_weights_into_model(MODEL_PATH, model)
+    model = MoondreamModel(config=MoondreamConfig(), setup_caches=True)
+    model.to(device)
 
-    # If you are struggling with GPU memory, try AdamW8Bit
+    state_dict = load_file(MODEL_PATH)
+    model.load_state_dict(state_dict)
     optimizer = AdamW(
-        [{"params": model.region.parameters()}],
+        [{"params": model.parameters()}],
         lr=LR,
-        betas=(0.9, 0.95),
-        eps=1e-6,
     )
 
     dataset = WasteDetection()
@@ -211,6 +205,8 @@ def main():
                 c_idx = []
                 s_idx = []
                 for bb in boxes_list:
+                    # set device of bb to model.device
+                    bb = bb.to(dtype=torch.bfloat16, device=model.device)
                     l_cs = len(cs_emb)
                     cs_emb.extend(
                         [
@@ -254,7 +250,7 @@ def main():
                 s_idx = torch.tensor(s_idx) + prefix
 
                 hidden = _produce_hidden(
-                    inputs_embeds=inputs_embeds, w=model.text, config=config.text
+                    inputs_embeds=inputs_embeds, w=model.text, config=model.config.text
                 )
 
                 loss = region_loss(

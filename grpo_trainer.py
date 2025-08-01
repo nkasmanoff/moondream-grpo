@@ -19,14 +19,14 @@ os.environ["VIPS_WARNING"] = "0"
 os.environ["VIPS_INFO"] = "0"
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 1
-NUM_ROLLOUTS = 32
+BATCH_SIZE = 3
+NUM_ROLLOUTS = 3
 LEARNING_RATE = 5e-5
 TRAIN_STEPS = 1
 
-EVAL_INTERVAL = 50
-VALIDATION_SAMPLES = 100
-MAX_PLOT_SAMPLES = 27
+EVAL_INTERVAL = 5
+VALIDATION_SAMPLES = 9
+MAX_PLOT_SAMPLES = 9
 safetensors_path = "moondream/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 

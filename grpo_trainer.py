@@ -1,16 +1,16 @@
 import numpy as np
 import torch
 from torch.optim import AdamW
-from moondream_functions import detect, detect_grad
-from refcoco_dataset import load_object_detection_dataset
-from rl_utils import calculate_rewards, calculate_single_reward
-from moondream import MoondreamModel, MoondreamConfig
+from moondream.moondream_functions import detect, detect_grad
+from moondream.refcoco_dataset import load_object_detection_dataset
+from moondream.rl_utils import calculate_rewards, calculate_single_reward
+from moondream.moondream import MoondreamModel, MoondreamConfig
 from safetensors.torch import load_file
-from rl_utils import calculate_grpo_loss
+from moondream.rl_utils import calculate_grpo_loss
 from safetensors.torch import save_file
 import wandb
 import logging
-from visualization_utils import plot_prediction
+from moondream.visualization_utils import plot_prediction
 import os
 import math
 
@@ -296,7 +296,6 @@ def main():
             logging.info(
                 f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"
             )
-
 
     wandb.finish()
 

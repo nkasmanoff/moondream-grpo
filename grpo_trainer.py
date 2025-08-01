@@ -27,7 +27,7 @@ TRAIN_STEPS = 1
 EVAL_INTERVAL = 50
 VALIDATION_SAMPLES = 100
 MAX_PLOT_SAMPLES = 27
-safetensors_path = "model.safetensors"
+safetensors_path = "moondream/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 

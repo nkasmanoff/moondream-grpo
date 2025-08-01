@@ -10,11 +10,11 @@ from moondream import (
     DEFAULT_MAX_OBJECTS,
     SpatialRefs,
 )
-from region import decode_coordinate, encode_coordinate, decode_size, encode_size
-from lora import variant_state_dict
-from text import text_encoder, lm_head, text_decoder
-from image_crops import reconstruct_from_crops
-from vision import vision_encoder, vision_projection, prepare_crops
+from .region import decode_coordinate, encode_coordinate, decode_size, encode_size
+from .lora import variant_state_dict
+from .text import text_encoder, lm_head, text_decoder
+from .image_crops import reconstruct_from_crops
+from .vision import vision_encoder, vision_projection, prepare_crops
 
 
 def _vis_enc(model: MoondreamModel, x: torch.Tensor):

@@ -4,7 +4,7 @@ import math
 
 from typing import List, Tuple, Union
 
-from layers import mlp
+from .layers import mlp
 
 SpatialRefs = List[Union[Tuple[float, float], Tuple[float, float, float, float]]]
 

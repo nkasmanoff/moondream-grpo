@@ -27,7 +27,7 @@ BATCH_SIZE = 3
 NUM_ROLLOUTS = 3
 LEARNING_RATE = 5e-5
 TRAIN_STEPS = 1
-
+CONSTANT_LR = True
 EVAL_INTERVAL = 5
 VALIDATION_SAMPLES = 9
 MAX_PLOT_SAMPLES = 9
@@ -35,7 +35,7 @@ safetensors_path = "moondream/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 
-def lr_schedule(step, max_steps, constant=True):
+def lr_schedule(step, max_steps, constant=CONSTANT_LR):
     if constant:
         return LEARNING_RATE
     x = step / max_steps
@@ -204,13 +204,21 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
 
 
 def validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES):
-    total_rewards = 0
+    TP = FP = FN = 0
     for i in range(max_samples):
         sample = val_ds[i]
         detections = {"objects": sample[2]}
-        reward = calculate_single_reward(detections, sample)
-        total_rewards += reward
-    return total_rewards / max_samples
+        tp, fp, fn = match_boxes_score(detections["objects"], sample[2])
+        precision = tp / (tp + fp)
+        recall = tp / (tp + fn)
+        f1 = 2 * (precision * recall) / (precision + recall)
+        TP += tp
+        FP += fp
+        FN += fn
+    precision = TP / (TP + FP)
+    recall = TP / (TP + FN)
+    f1 = 2 * (precision * recall) / (precision + recall)
+    return {"precision": precision, "recall": recall, "f1": f1}
 
 
 def main():
@@ -247,7 +255,7 @@ def main():
     val_ds = load_object_detection_dataset("val")
     best_validation_score = float("-inf")
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
-    logging.info(f"GT validation f1: {round(gt_validation_score, 4)}")
+    logging.info(f"GT validation f1: {round(gt_validation_score['f1'], 4)}")
     initial_validation_score = validate(
         model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
     )
@@ -255,7 +263,9 @@ def main():
 
     wandb.log(
         {
-            "gt_validation_f1": gt_validation_score,
+            "gt_validation_f1": gt_validation_score["f1"],
+            "gt_validation_precision": gt_validation_score["precision"],
+            "gt_validation_recall": gt_validation_score["recall"],
             "initial_validation_f1": initial_validation_score["f1"],
             "initial_validation_precision": initial_validation_score["precision"],
             "initial_validation_recall": initial_validation_score["recall"],

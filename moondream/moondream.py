@@ -60,7 +60,7 @@ class EncodedImage:
 
 
 class KVCache(nn.Module):
-
+    # TODO: find ways to optimize this when context is too large.
     def __init__(self, n_heads, n_kv_heads, max_context, dim, device, dtype):
         super().__init__()
         cache_shape = (1, n_kv_heads, max_context, dim // n_heads)

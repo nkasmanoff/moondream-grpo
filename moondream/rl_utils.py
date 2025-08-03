@@ -73,6 +73,28 @@ def match_boxes(predicted_boxes, true_boxes):
     return matched_boxes, matched_predictions
 
 
+def match_boxes_score(predicted_boxes, true_boxes, iou_threshold=0.5):
+    tp = fp = 0
+    seen = [False] * len(true_boxes)
+    for predicted_box in predicted_boxes:
+        best_iou = 0
+        best_index = -1
+        for i, true_box in enumerate(true_boxes):
+            if seen[i]:
+                continue
+            iou_score = calculate_iou(predicted_box, true_box)
+            if iou_score > best_iou:
+                best_iou = iou_score
+                best_index = i
+        if best_index != -1 and best_iou > iou_threshold:
+            tp += 1
+            seen[best_index] = True
+        else:
+            fp += 1
+    fn = len(true_boxes) - tp
+    return tp, fp, fn
+
+
 def calculate_single_reward(trajectory_detection, sample):
     trajectory_reward = float(0)
     predicted_boxes = trajectory_detection["objects"]

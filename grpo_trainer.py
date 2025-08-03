@@ -3,7 +3,11 @@ import torch
 from torch.optim import AdamW
 from moondream.moondream_functions import detect, detect_grad
 from moondream.refcoco_dataset import load_object_detection_dataset
-from moondream.rl_utils import calculate_rewards, calculate_single_reward
+from moondream.rl_utils import (
+    calculate_rewards,
+    calculate_single_reward,
+    match_boxes_score,
+)
 from moondream.moondream import MoondreamModel, MoondreamConfig
 from safetensors.torch import load_file
 from moondream.rl_utils import calculate_grpo_loss
@@ -173,24 +177,30 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
 
 def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
     model.eval()
-    total_rewards = 0
+    TP = FP = FN = 0
+
     images = []
     with torch.no_grad():
         for i in range(max_samples):
             sample = val_ds[i]
             detections = detect(model, sample[0], sample[1], None, temperature=0)
-            reward = calculate_single_reward(detections, sample)
+            tp, fp, fn = match_boxes_score(detections["objects"], sample[2])
             # plot sample
             if i < MAX_PLOT_SAMPLES:
                 fig = plot_prediction(detections, sample)
                 fig.savefig(f"predictions/prediction_{i}.png")
                 images.append(wandb.Image(f"predictions/prediction_{i}.png"))
-            total_rewards += reward
-    wandb.log({"predictions": images[-10:]}, step=step)
+            TP += tp
+            FP += fp
+            FN += fn
+    wandb.log({"predictions": images[-MAX_PLOT_SAMPLES:]}, step=step)
     model.train()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    return total_rewards / max_samples
+    precision = TP / (TP + FP)
+    recall = TP / (TP + FN)
+    f1 = 2 * (precision * recall) / (precision + recall)
+    return {"precision": precision, "recall": recall, "f1": f1}
 
 
 def validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES):
@@ -237,16 +247,18 @@ def main():
     val_ds = load_object_detection_dataset("val")
     best_validation_score = float("-inf")
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
-    logging.info(f"GT validation score: {round(gt_validation_score, 4)}")
+    logging.info(f"GT validation f1: {round(gt_validation_score, 4)}")
     initial_validation_score = validate(
         model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
     )
-    logging.info(f"Initial validation score: {round(initial_validation_score, 4)}")
+    logging.info(f"Initial validation f1: {round(initial_validation_score['f1'], 4)}")
 
     wandb.log(
         {
-            "gt_validation_score": gt_validation_score,
-            "initial_validation_score": initial_validation_score,
+            "gt_validation_f1": gt_validation_score,
+            "initial_validation_f1": initial_validation_score["f1"],
+            "initial_validation_precision": initial_validation_score["precision"],
+            "initial_validation_recall": initial_validation_score["recall"],
         },
         step=num_steps,
     )
@@ -277,10 +289,16 @@ def main():
                 validation_score = validate(
                     model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
                 )
-                logging.info(f"Validation score: {round(validation_score, 4)}")
-                wandb.log({"validation_score": validation_score}, step=num_steps)
-                if validation_score > best_validation_score:
-                    best_validation_score = validation_score
+                logging.info(f"Validation f1: {round(validation_score['f1'], 4)}")
+                wandb.log(
+                    {
+                        "validation_f1": validation_score["f1"],
+                        "validation_precision": validation_score["precision"],
+                        "validation_recall": validation_score["recall"],
+                    },
+                    step=num_steps,
+                )
+                if validation_score["f1"] > best_validation_score:
                     if not os.path.exists("models"):
                         os.makedirs("models")
 
@@ -289,9 +307,6 @@ def main():
                         model.state_dict(),
                         model_path,
                     )
-                    #                    artifact = wandb.Artifact(f"grpo-model-{num_steps}", type="model")
-                    #                    artifact.add_file(model_path)
-                    #                    wandb.log_artifact(artifact)
                     logging.info(f"Saved model to {model_path}")
             logging.info(
                 f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"

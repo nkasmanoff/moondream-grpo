@@ -253,12 +253,13 @@ def main():
 
     train_ds = load_object_detection_dataset("train")
     val_ds = load_object_detection_dataset("val")
-    best_validation_score = float("-inf")
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
     logging.info(f"GT validation f1: {round(gt_validation_score['f1'], 4)}")
     initial_validation_score = validate(
         model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
     )
+    best_validation_score = initial_validation_score["f1"]
+
     logging.info(f"Initial validation f1: {round(initial_validation_score['f1'], 4)}")
 
     wandb.log(

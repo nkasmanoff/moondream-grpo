@@ -5,7 +5,6 @@ from moondream.moondream_functions import detect, detect_grad
 from moondream.refcoco_dataset import load_object_detection_dataset
 from moondream.rl_utils import (
     calculate_rewards,
-    calculate_single_reward,
     match_boxes_score,
 )
 from moondream.moondream import MoondreamModel, MoondreamConfig
@@ -23,14 +22,15 @@ os.environ["VIPS_WARNING"] = "0"
 os.environ["VIPS_INFO"] = "0"
 
 NUM_EPOCHS = 1
-BATCH_SIZE = 3
-NUM_ROLLOUTS = 3
+BATCH_SIZE = 16
+NUM_ROLLOUTS = 7
 LEARNING_RATE = 5e-5
+WEIGHT_DECAY = 1e-6
 TRAIN_STEPS = 1
 CONSTANT_LR = True
-EVAL_INTERVAL = 5
-VALIDATION_SAMPLES = 9
-MAX_PLOT_SAMPLES = 9
+EVAL_INTERVAL = 1
+VALIDATION_SAMPLES = 150
+MAX_PLOT_SAMPLES = 12
 safetensors_path = "moondream/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 
@@ -199,7 +199,11 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
         torch.cuda.empty_cache()
     precision = TP / (TP + FP)
     recall = TP / (TP + FN)
-    f1 = 2 * (precision * recall) / (precision + recall)
+    if precision + recall == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * (precision * recall) / (precision + recall)
+
     return {"precision": precision, "recall": recall, "f1": f1}
 
 
@@ -244,11 +248,15 @@ def main():
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
     optimizer = AdamW(
-        [{"params": model.parameters()}],
+        [{"params": model.region.parameters()}],
         lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+        betas=(0.9, 0.95),
+        eps=1e-6,
+
     )
 
-    num_params = sum(p.numel() for p in model.parameters())
+    num_params = sum(p.numel() for p in model.region.parameters())
     logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
@@ -322,6 +330,7 @@ def main():
             logging.info(
                 f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"
             )
+
 
     wandb.finish()
 

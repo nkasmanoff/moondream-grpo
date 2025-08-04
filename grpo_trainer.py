@@ -21,16 +21,17 @@ import math
 os.environ["VIPS_WARNING"] = "0"
 os.environ["VIPS_INFO"] = "0"
 
-NUM_EPOCHS = 1
-BATCH_SIZE = 16
-NUM_ROLLOUTS = 7
-LEARNING_RATE = 5e-5
-WEIGHT_DECAY = 1e-6
+OVERFIT_TRAIN = True
+NUM_EPOCHS = 1 if not OVERFIT_TRAIN else 50
+BATCH_SIZE = 4
+NUM_ROLLOUTS = 3
+LEARNING_RATE = 1e-5
+WEIGHT_DECAY = 1e-8
 TRAIN_STEPS = 1
-CONSTANT_LR = True
+CONSTANT_LR = False if not OVERFIT_TRAIN else True
 EVAL_INTERVAL = 1
-VALIDATION_SAMPLES = 150
-MAX_PLOT_SAMPLES = 12
+VALIDATION_SAMPLES = 4
+MAX_PLOT_SAMPLES = 4
 safetensors_path = "moondream/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 
@@ -239,6 +240,10 @@ def main():
             "num_rollouts": NUM_ROLLOUTS,
             "train_steps_per_batch": TRAIN_STEPS,
             "validation_samples": VALIDATION_SAMPLES,
+            "overfit_train": OVERFIT_TRAIN,
+            "weight_decay": WEIGHT_DECAY,
+            "eval_interval": EVAL_INTERVAL,
+            "constant_lr": CONSTANT_LR,            
         },
     )
     num_steps = 0
@@ -248,7 +253,7 @@ def main():
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
     optimizer = AdamW(
-        [{"params": model.region.parameters()}],
+        [{"params": model.parameters()}],
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         betas=(0.9, 0.95),
@@ -256,11 +261,12 @@ def main():
 
     )
 
-    num_params = sum(p.numel() for p in model.region.parameters())
+    num_params = sum(p.numel() for p in model.parameters())
     logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
-    val_ds = load_object_detection_dataset("val")
+    val_split = "val" if not OVERFIT_TRAIN else "train"    
+    val_ds = load_object_detection_dataset(val_split)
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
     logging.info(f"GT validation f1: {round(gt_validation_score['f1'], 4)}")
     initial_validation_score = validate(
@@ -322,14 +328,16 @@ def main():
                         os.makedirs("models")
 
                     model_path = f"models/grpo_model_{num_steps}.safetensors"
-                    save_file(
-                        model.state_dict(),
-                        model_path,
-                    )
+                   # save_file(
+                   #     model.state_dict(),
+                   #     model_path,
+                   # )
                     logging.info(f"Saved model to {model_path}")
             logging.info(
                 f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"
             )
+            if OVERFIT_TRAIN:
+                break
 
 
     wandb.finish()

@@ -6,9 +6,9 @@ import numpy as np
 from typing import Union, Tuple
 from PIL import Image
 
-from layers import attn, layer_norm, mlp
-from image_crops import overlap_crop_image
-from config import VisionConfig
+from .layers import attn, layer_norm, mlp
+from .image_crops import overlap_crop_image
+from .config import VisionConfig
 
 if torch.backends.mps.is_available():
     # Non-divisible input sizes are not implemented on MPS device yet.

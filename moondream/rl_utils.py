@@ -18,8 +18,26 @@ def calculate_overlap(predicted_box, true_box):
     )
 
 
+def calculate_iou(predicted_box, true_box):
+    """Corner-format IoU. Returns 0 when either box has zero area."""
+
+    x1 = max(predicted_box["x_min"], true_box["x_min"])
+    y1 = max(predicted_box["y_min"], true_box["y_min"])
+    x2 = min(predicted_box["x_max"], true_box["x_max"])
+    y2 = min(predicted_box["y_max"], true_box["y_max"])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    union = (
+        (predicted_box["x_max"] - predicted_box["x_min"])
+        * (predicted_box["y_max"] - predicted_box["y_min"])
+        + (true_box["x_max"] - true_box["x_min"])
+        * (true_box["y_max"] - true_box["y_min"])
+        - inter
+    )
+    return inter / union if union else 0.0
+
+
 def calculate_object_center(predicted_box, true_box):
-    # finds the distance between the centers of the predicted and true boxes
+    """Finds the distance between the centers of the predicted and true boxes"""
     predicted_center_x = (predicted_box["x_min"] + predicted_box["x_max"]) / 2
     predicted_center_y = (predicted_box["y_min"] + predicted_box["y_max"]) / 2
     true_center_x = (true_box["x_min"] + true_box["x_max"]) / 2
@@ -36,18 +54,57 @@ def calculate_object_center(predicted_box, true_box):
     return 1 - distance
 
 
+def match_boxes(predicted_boxes, true_boxes):
+    """Greedy matching of predicted and true boxes. Organizes them in the order so that the largest possible IoU is achieved"""
+    matched_boxes = []
+    matched_predictions = []
+    for predicted_box in predicted_boxes:
+        best_iou = 0
+        best_index = -1
+        for i, true_box in enumerate(true_boxes):
+            iou_score = calculate_iou(predicted_box, true_box)
+            if iou_score > best_iou:
+                best_iou = iou_score
+                best_index = i
+        if best_index != -1:
+            matched_boxes.append(true_boxes[best_index])
+            matched_predictions.append(predicted_box)
+            true_boxes.pop(best_index)
+    return matched_boxes, matched_predictions
+
+
+def match_boxes_score(predicted_boxes, true_boxes, iou_threshold=0.5):
+    tp = fp = 0
+    seen = [False] * len(true_boxes)
+    for predicted_box in predicted_boxes:
+        best_iou = 0
+        best_index = -1
+        for i, true_box in enumerate(true_boxes):
+            if seen[i]:
+                continue
+            iou_score = calculate_iou(predicted_box, true_box)
+            if iou_score > best_iou:
+                best_iou = iou_score
+                best_index = i
+        if best_index != -1 and best_iou > iou_threshold:
+            tp += 1
+            seen[best_index] = True
+        else:
+            fp += 1
+    fn = len(true_boxes) - tp
+    return tp, fp, fn
+
+
 def calculate_single_reward(trajectory_detection, sample):
     trajectory_reward = float(0)
     predicted_boxes = trajectory_detection["objects"]
     true_boxes = sample[2]
-    if len(predicted_boxes) != len(true_boxes):
-        trajectory_reward -= 1
-    else:
-        trajectory_reward += 1
-    for predicted_box, true_box in zip(predicted_boxes, true_boxes):
-        overlap = calculate_overlap(predicted_box, true_box)
+    trajectory_reward += len(predicted_boxes) - len(true_boxes)
+    matched_boxes, matched_predictions = match_boxes(predicted_boxes, true_boxes)
+    for predicted_box, true_box in zip(matched_predictions, matched_boxes):
+        iou_score = calculate_iou(predicted_box, true_box)
         center_distance = calculate_object_center(predicted_box, true_box)
-        trajectory_reward += overlap + center_distance
+        trajectory_reward += iou_score + center_distance
     return trajectory_reward
 
 

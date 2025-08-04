@@ -4,9 +4,9 @@ import torch.nn as nn
 from torch.nn import functional as F
 from typing import Optional
 
-from layers import layer_norm, mlp, QuantizedLinear
-from rope import apply_rotary_emb, precompute_freqs_cis
-from config import TextConfig
+from .layers import layer_norm, mlp, QuantizedLinear
+from .rope import apply_rotary_emb, precompute_freqs_cis
+from .config import TextConfig
 
 
 def text_encoder(input_ids: torch.Tensor, w: nn.Module):

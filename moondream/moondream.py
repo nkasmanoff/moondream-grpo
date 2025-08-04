@@ -7,11 +7,11 @@ from PIL import Image
 from dataclasses import dataclass
 from tokenizers import Tokenizer
 
-from config import MoondreamConfig
-from image_crops import reconstruct_from_crops
-from vision import vision_encoder, vision_projection, prepare_crops, build_vision_model
-from text import build_text_model, text_encoder, lm_head, text_decoder
-from region import (
+from .config import MoondreamConfig
+from .image_crops import reconstruct_from_crops
+from .vision import vision_encoder, vision_projection, prepare_crops, build_vision_model
+from .text import build_text_model, text_encoder, lm_head, text_decoder
+from .region import (
     decode_coordinate,
     encode_coordinate,
     decode_size,
@@ -19,9 +19,9 @@ from region import (
     encode_spatial_refs,
     SpatialRefs,
 )
-from layers import QuantizedLinear
-from lora import variant_state_dict
-from utils import remove_outlier_points
+from .layers import QuantizedLinear
+from .lora import variant_state_dict
+from .utils import remove_outlier_points
 
 ImageEncodingSettings = TypedDict(
     "ImageEncodingSettings",
@@ -60,7 +60,7 @@ class EncodedImage:
 
 
 class KVCache(nn.Module):
-
+    # TODO: find ways to optimize this when context is too large.
     def __init__(self, n_heads, n_kv_heads, max_context, dim, device, dtype):
         super().__init__()
         cache_shape = (1, n_kv_heads, max_context, dim // n_heads)

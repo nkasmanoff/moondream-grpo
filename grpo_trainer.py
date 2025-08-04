@@ -20,15 +20,15 @@ import math
 
 OVERFIT_TRAIN = True
 NUM_EPOCHS = 1 if not OVERFIT_TRAIN else 50
-BATCH_SIZE = 4
-NUM_ROLLOUTS = 3
-LEARNING_RATE = 1e-5
+BATCH_SIZE = 8
+NUM_ROLLOUTS = 9
+LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-8
 TRAIN_STEPS = 1
 CONSTANT_LR = False if not OVERFIT_TRAIN else True
 EVAL_INTERVAL = 1
-VALIDATION_SAMPLES = 4
-MAX_PLOT_SAMPLES = 4
+VALIDATION_SAMPLES = 8
+MAX_PLOT_SAMPLES = 8
 safetensors_path = "moondream/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 
@@ -54,7 +54,7 @@ def collect_experience(train_ds, model, start_idx):
         trajectory_detections = []
 
         for _ in range(NUM_ROLLOUTS):
-            detections = detect(model, sample[0], sample[1], None, temperature=1.0)
+            detections = detect(model, sample[0], sample[1], None, temperature=1.2)
             if len(detections["objects"]) == 0:
                 # if no objects detected, skip this trajectory
                 continue
@@ -195,8 +195,12 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
     model.train()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    precision = TP / (TP + FP)
-    recall = TP / (TP + FN)
+    if TP + FP == 0:
+        precision = 0.0
+        recall = 0.0
+    else:
+        precision = TP / (TP + FP)
+        recall = TP / (TP + FN)
     if precision + recall == 0:
         f1 = 0.0
     else:

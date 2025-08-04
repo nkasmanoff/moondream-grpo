@@ -99,7 +99,9 @@ def calculate_single_reward(trajectory_detection, sample):
     trajectory_reward = float(0)
     predicted_boxes = trajectory_detection["objects"]
     true_boxes = sample[2]
-    trajectory_reward += len(predicted_boxes) - len(true_boxes)
+    trajectory_reward -= abs(
+        len(predicted_boxes) - len(true_boxes)
+    )  # deduct from the reward if the number of boxes doesn't line up.
     matched_boxes, matched_predictions = match_boxes(predicted_boxes, true_boxes)
     for predicted_box, true_box in zip(matched_predictions, matched_boxes):
         iou_score = calculate_iou(predicted_box, true_box)

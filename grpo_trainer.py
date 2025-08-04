@@ -17,9 +17,6 @@ from moondream.visualization_utils import plot_prediction
 import os
 import math
 
-# set. VIPS_WARNING=0 in environment
-os.environ["VIPS_WARNING"] = "0"
-os.environ["VIPS_INFO"] = "0"
 
 OVERFIT_TRAIN = True
 NUM_EPOCHS = 1 if not OVERFIT_TRAIN else 50
@@ -243,7 +240,7 @@ def main():
             "overfit_train": OVERFIT_TRAIN,
             "weight_decay": WEIGHT_DECAY,
             "eval_interval": EVAL_INTERVAL,
-            "constant_lr": CONSTANT_LR,            
+            "constant_lr": CONSTANT_LR,
         },
     )
     num_steps = 0
@@ -258,14 +255,13 @@ def main():
         weight_decay=WEIGHT_DECAY,
         betas=(0.9, 0.95),
         eps=1e-6,
-
     )
 
     num_params = sum(p.numel() for p in model.parameters())
     logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
-    val_split = "val" if not OVERFIT_TRAIN else "train"    
+    val_split = "val" if not OVERFIT_TRAIN else "train"
     val_ds = load_object_detection_dataset(val_split)
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
     logging.info(f"GT validation f1: {round(gt_validation_score['f1'], 4)}")
@@ -328,17 +324,16 @@ def main():
                         os.makedirs("models")
 
                     model_path = f"models/grpo_model_{num_steps}.safetensors"
-                   # save_file(
-                   #     model.state_dict(),
-                   #     model_path,
-                   # )
+                    # save_file(
+                    #     model.state_dict(),
+                    #     model_path,
+                    # )
                     logging.info(f"Saved model to {model_path}")
             logging.info(
                 f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"
             )
             if OVERFIT_TRAIN:
                 break
-
 
     wandb.finish()
 

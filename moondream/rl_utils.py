@@ -131,8 +131,9 @@ def calculate_grpo_loss(
         * advantages
     )
     loss = -torch.min(clipped, unclipped)
-
-    grpo_loss = (loss * attention_mask).mean().clamp(min=0, max=10)
+    loss = loss * attention_mask
+    response_mask_sum = attention_mask.sum(dim=1).clamp(min=1)
+    grpo_loss = (loss.sum() / response_mask_sum).mean()
     return grpo_loss
 
 

@@ -170,6 +170,8 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
         logging.error("Loss is NaN, skipping step")
         return 0
     total_loss.backward()
+    # apply gradient clipping
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     lr_val = lr_schedule(num_steps, NUM_EPOCHS * len(train_ds) / BATCH_SIZE)
     for param_group in optimizer.param_groups:

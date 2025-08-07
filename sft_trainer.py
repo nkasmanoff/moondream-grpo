@@ -1,3 +1,7 @@
+"""
+Graciously adapted from https://github.com/moondream-ai/moondream/blob/main/finetune_region.py
+"""
+
 import torch
 from torch.utils.data import Dataset
 import torch.nn.functional as F

@@ -132,9 +132,7 @@ def calculate_grpo_loss(
     )
     loss = -torch.min(clipped, unclipped)
 
-    # gpro loss is to take the sum where attention mask is 1, set to 0 otherwise
-
-    grpo_loss = (loss * attention_mask).mean()
+    grpo_loss = (loss * attention_mask).mean().clamp(min=0, max=10)
     return grpo_loss
 
 

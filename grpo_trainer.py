@@ -20,17 +20,22 @@ import math
 
 OVERFIT_TRAIN = True
 NUM_EPOCHS = 1 if not OVERFIT_TRAIN else 50
-BATCH_SIZE = 8
-NUM_ROLLOUTS = 9
+BATCH_SIZE = 3
+NUM_ROLLOUTS = 3
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-8
 TRAIN_STEPS = 1
 CONSTANT_LR = False if not OVERFIT_TRAIN else True
 EVAL_INTERVAL = 1
-VALIDATION_SAMPLES = 8
-MAX_PLOT_SAMPLES = 8
+VALIDATION_SAMPLES = 3
+MAX_PLOT_SAMPLES = 3
 safetensors_path = "moondream/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
+
+# Rollout warning
+
+if NUM_ROLLOUTS == 1:
+    raise ValueError("NUM_ROLLOUTS must be greater than 1")
 
 
 def lr_schedule(step, max_steps, constant=CONSTANT_LR):
@@ -54,7 +59,7 @@ def collect_experience(train_ds, model, start_idx):
         trajectory_detections = []
 
         for _ in range(NUM_ROLLOUTS):
-            detections = detect(model, sample[0], sample[1], None, temperature=1.2)
+            detections = detect(model, sample[0], sample[1], None, temperature=1.5)
             if len(detections["objects"]) == 0:
                 # if no objects detected, skip this trajectory
                 continue
@@ -68,7 +73,7 @@ def collect_experience(train_ds, model, start_idx):
 
         advantages = rewards - np.mean(rewards)
 
-        advantages = advantages / np.std(advantages)
+        advantages = advantages / max(np.std(advantages), 1e-6)
 
         advantages = torch.tensor(advantages, dtype=torch.float32).to(model.device)
         advantages = advantages.unsqueeze(1)

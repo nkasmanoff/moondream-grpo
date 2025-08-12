@@ -1,0 +1,7 @@
+einops
+pyvips-binary==8.16.0
+pyvips==2.2.3
+transformers==4.51.3
+torch==2.7.1
+pandas
+torchvision==0.22.1

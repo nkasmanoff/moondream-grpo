@@ -7,7 +7,21 @@ from moondream2.rl_utils import (
     calculate_rewards,
     match_boxes_score,
 )
-from moondream2.moondream import MoondreamModel, MoondreamConfig
+
+MD_VERSION = "3"
+if MD_VERSION == "3":
+    from moondream3.moondream import MoondreamModel, MoondreamConfig
+    from moondream3.moondream_functions import detect, detect_grad
+
+    safetensors_path = "models/model_md3.safetensors"
+elif MD_VERSION == "2":
+    from moondream2.moondream import MoondreamModel, MoondreamConfig
+    from moondream2.moondream_functions import detect, detect_grad
+
+    safetensors_path = "moondream2/model.safetensors"
+
+else:
+    raise ValueError(f"Invalid MD_VERSION: {MD_VERSION}")
 from safetensors.torch import load_file
 from moondream2.rl_utils import calculate_grpo_loss
 from safetensors.torch import save_file
@@ -29,7 +43,6 @@ CONSTANT_LR = False if not OVERFIT_TRAIN else True
 EVAL_INTERVAL = 1
 VALIDATION_SAMPLES = 3
 MAX_PLOT_SAMPLES = 3
-safetensors_path = "moondream2/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 # Rollout warning
@@ -255,11 +268,17 @@ def main():
         },
     )
     num_steps = 0
-    model = MoondreamModel(config=MoondreamConfig(), setup_caches=True)
+    if MD_VERSION == "3":
+        setup_caches = False
+    else:
+        setup_caches = True
+    model = MoondreamModel(config=MoondreamConfig(), setup_caches=setup_caches)
     model.to(device)
-
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
+    if MD_VERSION == "3":
+        model._setup_caches()
+
     optimizer = AdamW(
         [{"params": model.parameters()}],
         lr=LEARNING_RATE,

@@ -1,9 +1,9 @@
-from typing import Union, Optional, Dict
+from typing import Union, Optional, Dict, List
 
 import torch
 from PIL import Image
 
-from moondream import (
+from .moondream import (
     MoondreamModel,
     EncodedImage,
     ObjectSamplingSettings,
@@ -17,11 +17,18 @@ from .image_crops import reconstruct_from_crops
 from .vision import vision_encoder, vision_projection, prepare_crops
 
 
+# -----------------------------------------------------------------------------
+# Low-level helpers wrapping vision and text sub-modules
+# -----------------------------------------------------------------------------
+
+
 def _vis_enc(model: MoondreamModel, x: torch.Tensor):
+    """Forward pass through the vision encoder only."""
     return vision_encoder(x, model.vision, model.config.vision)
 
 
 def _vis_proj(model: MoondreamModel, g: torch.Tensor, r: torch.Tensor):
+    """Project global & reconstructed local features to text-embedding space."""
     return vision_projection(g, r, model.vision, model.config.vision)
 
 
@@ -30,8 +37,9 @@ def _prefill(
     x: torch.Tensor,
     attn_mask: torch.Tensor,
     pos_ids: torch.Tensor,
-    lora: Optional[torch.Tensor],
+    lora: Optional[Dict[str, torch.Tensor]],
 ):
+    """Run the text decoder in pre-fill mode (multiple tokens)."""
     return text_decoder(x, model.text, attn_mask, pos_ids, model.config.text, lora)
 
 
@@ -40,16 +48,24 @@ def _decode_one_tok(
     x: torch.Tensor,
     attn_mask: torch.Tensor,
     pos_ids: torch.Tensor,
-    lora: Optional[torch.Tensor],
+    lora: Optional[Dict[str, torch.Tensor]],
 ):
+    """Decode a single token autoregressively and return logits + hidden state."""
     hidden = text_decoder(x, model.text, attn_mask, pos_ids, model.config.text, lora)
     logits = lm_head(hidden, model.text)
     return logits, hidden
 
 
+# -----------------------------------------------------------------------------
+# Image helpers
+# -----------------------------------------------------------------------------
+
+
 def _run_vision_encoder(model: MoondreamModel, image: Image.Image) -> torch.Tensor:
+    """Encode an input image to a sequence of vision embeddings."""
     all_crops, tiling = prepare_crops(image, model.config.vision, device=model.device)
     torch._dynamo.mark_dynamic(all_crops, 0)
+
     outputs = _vis_enc(model, all_crops)
     global_features = outputs[0]
     local_features = outputs[1:].view(
@@ -67,7 +83,13 @@ def _run_vision_encoder(model: MoondreamModel, image: Image.Image) -> torch.Tens
     return _vis_proj(model, global_features, reconstructed)
 
 
+# -----------------------------------------------------------------------------
+# Sampling utilities
+# -----------------------------------------------------------------------------
+
+
 def _apply_top_p(probs: torch.Tensor, top_p: float):
+    """Nucleus (top-p) filtering on a probability distribution."""
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > top_p
@@ -78,6 +100,11 @@ def _apply_top_p(probs: torch.Tensor, top_p: float):
     return next_probs
 
 
+# -----------------------------------------------------------------------------
+# Prefill prompt (no-grad and with-grad versions)
+# -----------------------------------------------------------------------------
+
+
 def _prefill_prompt(
     model: MoondreamModel,
     prompt_tokens: torch.Tensor,
@@ -86,7 +113,7 @@ def _prefill_prompt(
     top_p: float,
     spatial_refs: Optional[SpatialRefs] = None,
     attn_mask: Optional[torch.Tensor] = None,
-    lora: Optional[dict] = None,
+    lora: Optional[Dict[str, torch.Tensor]] = None,
 ):
     with torch.inference_mode():
         prompt_emb = text_encoder(prompt_tokens, model.text)
@@ -96,7 +123,9 @@ def _prefill_prompt(
             attn_mask = model.attn_mask
 
         mask = attn_mask[:, :, pos : pos + prompt_emb.size(1), :]
-        pos_ids = torch.arange(pos, pos + prompt_emb.size(1), dtype=torch.long)
+        pos_ids = torch.arange(
+            pos, pos + prompt_emb.size(1), dtype=torch.long, device=model.device
+        )
         hidden_BC = _prefill(model, prompt_emb, mask, pos_ids, lora)
         logits_BV = lm_head(hidden_BC, model.text)
 
@@ -111,6 +140,45 @@ def _prefill_prompt(
     return logits_BV, hidden_BC, next_token, pos
 
 
+def _prefill_prompt_grad(
+    model: MoondreamModel,
+    prompt_tokens: torch.Tensor,
+    pos: int,
+    temperature: float,
+    top_p: float,
+    spatial_refs: Optional[SpatialRefs] = None,
+    attn_mask: Optional[torch.Tensor] = None,
+    lora: Optional[Dict[str, torch.Tensor]] = None,
+):
+    prompt_emb = text_encoder(prompt_tokens, model.text)
+    torch._dynamo.mark_dynamic(prompt_emb, 1)
+
+    if attn_mask is None:
+        attn_mask = model.attn_mask
+
+    mask = attn_mask[:, :, pos : pos + prompt_emb.size(1), :]
+    pos_ids = torch.arange(
+        pos, pos + prompt_emb.size(1), dtype=torch.long, device=model.device
+    )
+    hidden_BC = _prefill(model, prompt_emb, mask, pos_ids, lora)
+    logits_BV = lm_head(hidden_BC, model.text)
+
+    if temperature == 0:
+        next_token = torch.argmax(logits_BV, dim=-1).unsqueeze(1)
+    else:
+        probs = torch.softmax(logits_BV / temperature, dim=-1)
+        probs = _apply_top_p(probs, top_p)
+        next_token = torch.multinomial(probs, num_samples=1)
+
+    pos = pos + prompt_emb.size(1)
+    return logits_BV, hidden_BC, next_token, pos
+
+
+# -----------------------------------------------------------------------------
+# Point/box generation (no-grad and with-grad)
+# -----------------------------------------------------------------------------
+
+
 def _generate_points(
     model: MoondreamModel,
     hidden: torch.Tensor,
@@ -118,11 +186,11 @@ def _generate_points(
     pos: int,
     include_size: bool = True,
     max_objects: int = DEFAULT_MAX_OBJECTS,
-    lora: Optional[dict] = None,
+    lora: Optional[Dict[str, torch.Tensor]] = None,
     temperature: float = 0.0,
 ):
-    out = []
-    mask = torch.zeros(1, 1, 2048, device=model.device, dtype=torch.bool)
+    out: List[Dict[str, torch.Tensor]] = []
+    mask = torch.zeros(1, 1, 4096, device=model.device, dtype=torch.bool)
     mask[:, :, :pos] = 1
     pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
 
@@ -131,15 +199,14 @@ def _generate_points(
             next_token.item() != model.config.tokenizer.eos_id
             and len(out) < max_objects
         ):
+            # ---------------------------------- X coordinate
             x_logits = decode_coordinate(hidden, model.region)
-
             if temperature > 0:
                 x_probs = torch.softmax(x_logits.squeeze(0) / temperature, dim=-1)
                 x_bin = torch.multinomial(x_probs, num_samples=1)
             else:
                 x_bin = torch.argmax(x_logits, dim=-1)
 
-            x_logit = torch.gather(x_logits.squeeze(0), -1, x_bin)
             x_logprob = torch.log_softmax(x_logits.squeeze(0), dim=-1)
             x_logprob = torch.gather(x_logprob, -1, x_bin).squeeze()
             x_center = x_bin.float() / x_logits.size(-1)
@@ -150,15 +217,15 @@ def _generate_points(
             mask[:, :, pos], pos_ids[0] = 1, pos
             _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
             pos += 1
-            y_logits = decode_coordinate(hidden, model.region)
 
+            # ---------------------------------- Y coordinate
+            y_logits = decode_coordinate(hidden, model.region)
             if temperature > 0:
                 y_probs = torch.softmax(y_logits.squeeze(0) / temperature, dim=-1)
                 y_bin = torch.multinomial(y_probs, num_samples=1)
             else:
                 y_bin = torch.argmax(y_logits, dim=-1)
 
-            y_logit = torch.gather(y_logits.squeeze(0), -1, y_bin)
             y_logprob = torch.log_softmax(y_logits.squeeze(0), dim=-1)
             y_logprob = torch.gather(y_logprob, -1, y_bin).squeeze()
             y_center = y_bin.float() / y_logits.size(-1)
@@ -166,6 +233,7 @@ def _generate_points(
                 y_center.unsqueeze(-1).to(dtype=y_logits.dtype), model.region
             )
 
+            # ---------------------------------- Size (optional)
             if include_size:
                 mask[:, :, pos], pos_ids[0] = 1, pos
                 _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
@@ -181,18 +249,10 @@ def _generate_points(
                     w_bin = torch.argmax(size_logits[0], dim=-1)
                     h_bin = torch.argmax(size_logits[1], dim=-1)
 
-                w_logit = torch.gather(
-                    size_logits[0], -1, w_bin.unsqueeze(-1)
-                ).squeeze()
-                h_logit = torch.gather(
-                    size_logits[1], -1, h_bin.unsqueeze(-1)
-                ).squeeze()
-
-                w_logprobs = torch.log_softmax(size_logits[0], dim=-1)
-                w_logprob = torch.gather(w_logprobs, -1, w_bin.unsqueeze(-1)).squeeze()
-
-                h_logprobs = torch.log_softmax(size_logits[1], dim=-1)
-                h_logprob = torch.gather(h_logprobs, -1, h_bin.unsqueeze(-1)).squeeze()
+                w_logprob = torch.log_softmax(size_logits[0], dim=-1)
+                w_logprob = torch.gather(w_logprob, -1, w_bin.unsqueeze(-1)).squeeze()
+                h_logprob = torch.log_softmax(size_logits[1], dim=-1)
+                h_logprob = torch.gather(h_logprob, -1, h_bin.unsqueeze(-1)).squeeze()
 
                 w = torch.pow(2.0, (w_bin.float() / 1023.0) * 10.0 - 10.0)
                 h = torch.pow(2.0, (h_bin.float() / 1023.0) * 10.0 - 10.0)
@@ -238,6 +298,143 @@ def _generate_points(
     return out
 
 
+# ---------------- Gradient-tracking variant ----------------
+
+
+def _generate_points_grad(
+    model: MoondreamModel,
+    hidden: torch.Tensor,
+    next_token: torch.Tensor,
+    pos: int,
+    include_size: bool = True,
+    max_objects: int = DEFAULT_MAX_OBJECTS,
+    lora: Optional[Dict[str, torch.Tensor]] = None,
+    temperature: float = 0.0,
+):
+    out: List[Dict[str, torch.Tensor]] = []
+    out_logits: List[torch.Tensor] = []
+    out_logprobs: List[torch.Tensor] = []
+    mask = torch.zeros(1, 1, 4096, device=model.device, dtype=torch.bool)
+    mask[:, :, :pos] = 1
+
+    while next_token.item() != model.config.tokenizer.eos_id and len(out) < max_objects:
+        # X coordinate
+        x_logits = decode_coordinate(hidden, model.region)
+        if temperature > 0:
+            x_probs = torch.softmax(x_logits.squeeze(0) / temperature, dim=-1)
+            x_bin = torch.multinomial(x_probs, num_samples=1)
+        else:
+            x_bin = torch.argmax(x_logits, dim=-1)
+
+        x_logprobs = torch.log_softmax(x_logits.squeeze(1), dim=-1)
+        x_logprob = torch.gather(x_logprobs, -1, x_bin).squeeze()
+        out_logprobs.append(x_logprob)
+        x_logit = torch.gather(x_logits.squeeze(1), -1, x_bin).squeeze()
+        x_center = x_bin.float() / x_logits.size(-1)
+        next_emb = encode_coordinate(
+            x_center.unsqueeze(-1).to(dtype=x_logits.dtype), model.region
+        )
+
+        mask[:, :, pos] = 1
+        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+        _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+        pos += 1
+
+        # Y coordinate
+        y_logits = decode_coordinate(hidden, model.region)
+        if temperature > 0:
+            y_probs = torch.softmax(y_logits.squeeze(0) / temperature, dim=-1)
+            y_bin = torch.multinomial(y_probs, num_samples=1)
+        else:
+            y_bin = torch.argmax(y_logits, dim=-1)
+
+        y_logprobs = torch.log_softmax(y_logits.squeeze(1), dim=-1)
+        y_logprob = torch.gather(y_logprobs, -1, y_bin).squeeze()
+        out_logprobs.append(y_logprob)
+        y_logit = torch.gather(y_logits.squeeze(1), -1, y_bin).squeeze()
+        y_center = y_bin.float() / y_logits.size(-1)
+        next_emb = encode_coordinate(
+            y_center.unsqueeze(-1).to(dtype=y_logits.dtype), model.region
+        )
+
+        if include_size:
+            mask[:, :, pos] = 1
+            pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+            _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+            pos += 1
+            size_logits = decode_size(hidden, model.region)
+
+            if temperature > 0:
+                w_probs = torch.softmax(size_logits[0] / temperature, dim=-1)
+                w_bin = torch.multinomial(w_probs, num_samples=1)[0]
+                h_probs = torch.softmax(size_logits[1] / temperature, dim=-1)
+                h_bin = torch.multinomial(h_probs, num_samples=1)[0]
+            else:
+                w_bin = torch.argmax(size_logits[0], dim=-1)
+                h_bin = torch.argmax(size_logits[1], dim=-1)
+
+            w_logit = torch.gather(size_logits[0], -1, w_bin.unsqueeze(-1)).squeeze()
+            h_logit = torch.gather(size_logits[1], -1, h_bin.unsqueeze(-1)).squeeze()
+
+            w_logprobs = torch.log_softmax(size_logits[0], dim=-1)
+            w_logprob = torch.gather(w_logprobs, -1, w_bin.unsqueeze(-1)).squeeze()
+            out_logprobs.append(w_logprob)
+            h_logprobs = torch.log_softmax(size_logits[1], dim=-1)
+            h_logprob = torch.gather(h_logprobs, -1, h_bin.unsqueeze(-1)).squeeze()
+            out_logprobs.append(h_logprob)
+
+            w = torch.pow(2.0, (w_bin.float() / 1023.0) * 10.0 - 10.0)
+            h = torch.pow(2.0, (h_bin.float() / 1023.0) * 10.0 - 10.0)
+
+            next_emb = (
+                encode_size(
+                    torch.tensor(
+                        [w, h], device=model.device, dtype=size_logits[0].dtype
+                    ),
+                    model.region,
+                )
+                .unsqueeze(0)
+                .unsqueeze(0)
+            )
+
+            out.append(
+                {
+                    "x_min": x_center.item() - w.item() / 2,
+                    "y_min": y_center.item() - h.item() / 2,
+                    "x_max": x_center.item() + w.item() / 2,
+                    "y_max": y_center.item() + h.item() / 2,
+                    "x_logit": x_logit,
+                    "y_logit": y_logit,
+                    "w_logit": w_logit,
+                    "h_logit": h_logit,
+                }
+            )
+            out_logits.extend([x_logit, y_logit, w_logit, h_logit])
+        else:
+            out.append(
+                {
+                    "x": x_center.item(),
+                    "y": y_center.item(),
+                    "x_logit": x_logit,
+                    "y_logit": y_logit,
+                }
+            )
+            out_logits.extend([x_logit, y_logit])
+
+        mask[:, :, pos] = 1
+        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+        logits, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+        pos += 1
+        next_token = torch.argmax(logits, dim=-1)
+
+    return out, out_logits, out_logprobs
+
+
+# -----------------------------------------------------------------------------
+# Public API
+# -----------------------------------------------------------------------------
+
+
 def detect(
     model: MoondreamModel,
     image: Union[Image.Image, EncodedImage],
@@ -245,6 +442,7 @@ def detect(
     settings: Optional[ObjectSamplingSettings] = None,
     temperature: float = 0.0,
 ):
+    """Detect objects described by *object_str* in *image* (no gradients)."""
     if model.config.tokenizer.templates["detect"] is None:
         raise NotImplementedError("Model does not support object detection.")
 
@@ -290,11 +488,15 @@ def detect(
     return {"objects": objects}
 
 
+# ---------------- Gradient-tracking variant ----------------
+
+
 def encode_image_grad(
     model: MoondreamModel,
     image: Union[Image.Image, EncodedImage],
     settings: Optional[Dict] = None,
 ) -> EncodedImage:
+    """Same as model.encode_image but keeps grad for the vision encoder."""
     if isinstance(image, EncodedImage):
         return image
     elif not isinstance(image, Image.Image):
@@ -313,7 +515,7 @@ def encode_image_grad(
     )
     inputs_embeds = torch.cat([bos_emb, img_emb[None]], dim=1)
     mask = model.attn_mask[:, :, 0 : inputs_embeds.size(1), :]
-    pos_ids = torch.arange(inputs_embeds.size(1), dtype=torch.long)
+    pos_ids = torch.arange(inputs_embeds.size(1), dtype=torch.long, device=model.device)
     _prefill(model, inputs_embeds, mask, pos_ids, lora)
 
     return EncodedImage(
@@ -328,171 +530,6 @@ def encode_image_grad(
     )
 
 
-def _prefill_prompt_grad(
-    model: MoondreamModel,
-    prompt_tokens: torch.Tensor,
-    pos: int,
-    temperature: float,
-    top_p: float,
-    spatial_refs: Optional[SpatialRefs] = None,
-    attn_mask: Optional[torch.Tensor] = None,
-    lora: Optional[dict] = None,
-):
-    prompt_emb = text_encoder(prompt_tokens, model.text)
-    torch._dynamo.mark_dynamic(prompt_emb, 1)
-
-    if attn_mask is None:
-        attn_mask = model.attn_mask
-
-    mask = attn_mask[:, :, pos : pos + prompt_emb.size(1), :]
-    pos_ids = torch.arange(pos, pos + prompt_emb.size(1), dtype=torch.long)
-    hidden_BC = _prefill(model, prompt_emb, mask, pos_ids, lora)
-    logits_BV = lm_head(hidden_BC, model.text)
-
-    if temperature == 0:
-        next_token = torch.argmax(logits_BV, dim=-1).unsqueeze(1)
-    else:
-        probs = torch.softmax(logits_BV / temperature, dim=-1)
-        probs = _apply_top_p(probs, top_p)
-        next_token = torch.multinomial(probs, num_samples=1)
-
-    pos = pos + prompt_emb.size(1)
-    return logits_BV, hidden_BC, next_token, pos
-
-
-def _generate_points_grad(
-    model: MoondreamModel,
-    hidden: torch.Tensor,
-    next_token: torch.Tensor,
-    pos: int,
-    include_size: bool = True,
-    max_objects: int = DEFAULT_MAX_OBJECTS,
-    lora: Optional[dict] = None,
-    temperature: float = 0.0,
-):
-    out = []
-    out_logits = []
-    out_logprobs = []
-    mask = torch.zeros(1, 1, 2048, device=model.device, dtype=torch.bool)
-    mask[:, :, :pos] = 1
-
-    while next_token.item() != model.config.tokenizer.eos_id and len(out) < max_objects:
-        x_logits = decode_coordinate(hidden, model.region)
-        if temperature > 0:
-            x_probs = torch.softmax(x_logits.squeeze(0) / temperature, dim=-1)
-            x_bin = torch.multinomial(x_probs, num_samples=1)
-
-        else:
-            x_bin = torch.argmax(x_logits, dim=-1)
-
-        x_logprobs = torch.log_softmax(x_logits.squeeze(1), dim=-1)
-        x_logprob = torch.gather(x_logprobs, -1, x_bin).squeeze()
-        out_logprobs.append(x_logprob)
-        x_logit = torch.gather(x_logits.squeeze(1), -1, x_bin).squeeze()
-        x_center = x_bin.float() / x_logits.size(-1)
-        next_emb = encode_coordinate(
-            x_center.unsqueeze(-1).to(dtype=x_logits.dtype), model.region
-        )
-
-        mask[:, :, pos] = 1
-        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
-        pos += 1
-
-        y_logits = decode_coordinate(hidden, model.region)
-        if temperature > 0:
-            y_probs = torch.softmax(y_logits.squeeze(0) / temperature, dim=-1)
-            y_bin = torch.multinomial(y_probs, num_samples=1)
-        else:
-            y_bin = torch.argmax(y_logits, dim=-1)
-
-        y_logprobs = torch.log_softmax(y_logits.squeeze(1), dim=-1)
-        y_logprob = torch.gather(y_logprobs, -1, y_bin).squeeze()
-        out_logprobs.append(y_logprob)
-        y_logit = torch.gather(y_logits.squeeze(1), -1, y_bin).squeeze()
-        y_center = y_bin.float() / y_logits.size(-1)
-        next_emb = encode_coordinate(
-            y_center.unsqueeze(-1).to(dtype=y_logits.dtype), model.region
-        )
-
-        if include_size:
-            mask[:, :, pos] = 1
-            pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-            _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
-            pos += 1
-            size_logits = decode_size(hidden, model.region)
-
-            if temperature > 0:
-                w_probs = torch.softmax(size_logits[0] / temperature, dim=-1)
-                w_bin = torch.multinomial(w_probs, num_samples=1)[0]
-                h_probs = torch.softmax(size_logits[1] / temperature, dim=-1)
-                h_bin = torch.multinomial(h_probs, num_samples=1)[0]
-            else:
-                w_bin = torch.argmax(size_logits[0], dim=-1)
-                h_bin = torch.argmax(size_logits[1], dim=-1)
-
-            w_logit = torch.gather(size_logits[0], -1, w_bin.unsqueeze(-1)).squeeze()
-            h_logit = torch.gather(size_logits[1], -1, h_bin.unsqueeze(-1)).squeeze()
-
-            w_logprobs = torch.log_softmax(size_logits[0], dim=-1)
-            w_logprob = torch.gather(w_logprobs, -1, w_bin.unsqueeze(-1)).squeeze()
-            out_logprobs.append(w_logprob)
-
-            h_logprobs = torch.log_softmax(size_logits[1], dim=-1)
-            h_logprob = torch.gather(h_logprobs, -1, h_bin.unsqueeze(-1)).squeeze()
-            out_logprobs.append(h_logprob)
-
-            w = torch.pow(2.0, (w_bin.float() / 1023.0) * 10.0 - 10.0)
-            h = torch.pow(2.0, (h_bin.float() / 1023.0) * 10.0 - 10.0)
-
-            next_emb = (
-                encode_size(
-                    torch.tensor(
-                        [w, h], device=model.device, dtype=size_logits[0].dtype
-                    ),
-                    model.region,
-                )
-                .unsqueeze(0)
-                .unsqueeze(0)
-            )
-
-            out.append(
-                {
-                    "x_min": x_center.item() - w.item() / 2,
-                    "y_min": y_center.item() - h.item() / 2,
-                    "x_max": x_center.item() + w.item() / 2,
-                    "y_max": y_center.item() + h.item() / 2,
-                    "x_logit": x_logit,
-                    "y_logit": y_logit,
-                    "w_logit": w_logit,
-                    "h_logit": h_logit,
-                }
-            )
-            out_logits.append(x_logit)
-            out_logits.append(y_logit)
-            out_logits.append(w_logit)
-            out_logits.append(h_logit)
-        else:
-            out.append(
-                {
-                    "x": x_center.item(),
-                    "y": y_center.item(),
-                    "x_logit": x_logit,
-                    "y_logit": y_logit,
-                }
-            )
-            out_logits.append(x_logit)
-            out_logits.append(y_logit)
-
-        mask[:, :, pos] = 1
-        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        logits, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
-        pos += 1
-        next_token = torch.argmax(logits, dim=-1)
-
-    return out, out_logits, out_logprobs
-
-
 def detect_grad(
     model: MoondreamModel,
     image: Union[Image.Image, EncodedImage],
@@ -500,6 +537,7 @@ def detect_grad(
     settings: Optional[ObjectSamplingSettings] = None,
     temperature: float = 0.0,
 ):
+    """Detect objects and return logits/logprobs for optimisation."""
     model._setup_caches()
     if model.config.tokenizer.templates["detect"] is None:
         raise NotImplementedError("Model does not support object detection.")

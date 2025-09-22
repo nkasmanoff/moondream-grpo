@@ -31,7 +31,7 @@ import os
 import math
 
 
-OVERFIT_TRAIN = True
+OVERFIT_TRAIN = False
 NUM_EPOCHS = 1 if not OVERFIT_TRAIN else 50
 BATCH_SIZE = 3
 NUM_ROLLOUTS = 3
@@ -40,8 +40,8 @@ WEIGHT_DECAY = 1e-8
 TRAIN_STEPS = 1
 CONSTANT_LR = False if not OVERFIT_TRAIN else True
 EVAL_INTERVAL = 1
-VALIDATION_SAMPLES = 3
-MAX_PLOT_SAMPLES = 3
+VALIDATION_SAMPLES = 250
+MAX_PLOT_SAMPLES = 25
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 # Rollout warning

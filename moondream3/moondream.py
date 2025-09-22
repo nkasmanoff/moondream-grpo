@@ -139,7 +139,8 @@ class MoondreamModel(nn.Module):
         attn_mask[..., :prefix_attn_len, :prefix_attn_len] = 1
         self.register_buffer("attn_mask", attn_mask, persistent=False)
 
-        self.use_flex_decoding = True
+        # Enable flex decoding only where supported (CUDA/CPU). Disable on MPS and others.
+        self.use_flex_decoding = self._is_flex_attention_supported()
         self._causal_block_mask = None
         self._point_gen_indices = None
 
@@ -151,12 +152,14 @@ class MoondreamModel(nn.Module):
     def causal_block_mask(self):
         # The things we do to deal with ZeroGPU...
         if self._causal_block_mask is None:
+            # Ensure mask is created on the same device as the model
             self._causal_block_mask = create_block_mask(
                 causal_mask,
                 B=None,
                 H=None,
                 Q_LEN=self.config.text.max_context,
                 KV_LEN=self.config.text.max_context,
+                device=self.device,
             )
         return self._causal_block_mask
 
@@ -185,6 +188,15 @@ class MoondreamModel(nn.Module):
     def device(self):
         return self.vision.pos_emb.device
 
+    def _is_flex_attention_supported(self) -> bool:
+        dev_type = self.device.type
+        if dev_type == "mps":
+            return False
+        try:
+            return torch._dynamo.is_dynamo_supported() and dev_type in ("cuda", "cpu")
+        except Exception:
+            return False
+
     def _vis_enc(self, x: torch.Tensor):
         return vision_encoder(x, self.vision, self.config.vision)
 
@@ -208,7 +220,7 @@ class MoondreamModel(nn.Module):
         lora: Optional[torch.Tensor],
         lm_head_indices: Optional[torch.Tensor] = None,
     ):
-        if self.use_flex_decoding:
+        if self.use_flex_decoding and self._is_flex_attention_supported():
             torch._assert(pos_ids.shape[-1] == 1, "Invalid position ID shape")
             block_index = pos_ids // self.causal_block_mask.BLOCK_SIZE[0]
             mask = self.causal_block_mask[:, :, block_index]
@@ -235,7 +247,8 @@ class MoondreamModel(nn.Module):
                 module.unpack()
 
         # Initialize lazy properties to avoid first-call overhead
-        self.causal_block_mask
+        if self.use_flex_decoding:
+            self.causal_block_mask
         self.point_gen_indices
 
         # TODO: vision_projection and _prefill is not being compiled

@@ -1,19 +1,19 @@
 import numpy as np
 import torch
 from torch.optim import AdamW
-from moondream.moondream_functions import detect, detect_grad
-from moondream.refcoco_dataset import load_object_detection_dataset
-from moondream.rl_utils import (
+from moondream2.moondream_functions import detect, detect_grad
+from moondream2.refcoco_dataset import load_object_detection_dataset
+from moondream2.rl_utils import (
     calculate_rewards,
     match_boxes_score,
 )
-from moondream.moondream import MoondreamModel, MoondreamConfig
+from moondream2.moondream import MoondreamModel, MoondreamConfig
 from safetensors.torch import load_file
-from moondream.rl_utils import calculate_grpo_loss
+from moondream2.rl_utils import calculate_grpo_loss
 from safetensors.torch import save_file
 import wandb
 import logging
-from moondream.visualization_utils import plot_prediction
+from moondream2.visualization_utils import plot_prediction
 import os
 import math
 
@@ -29,7 +29,7 @@ CONSTANT_LR = False if not OVERFIT_TRAIN else True
 EVAL_INTERVAL = 1
 VALIDATION_SAMPLES = 3
 MAX_PLOT_SAMPLES = 3
-safetensors_path = "moondream/model.safetensors"
+safetensors_path = "moondream2/model.safetensors"
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 # Rollout warning

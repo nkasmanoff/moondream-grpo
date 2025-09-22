@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 from torch.optim import AdamW
-from moondream2.moondream_functions import detect, detect_grad
 from moondream2.refcoco_dataset import load_object_detection_dataset
 from moondream2.rl_utils import (
     calculate_rewards,
@@ -184,7 +183,7 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
         return 0
     total_loss.backward()
     # apply gradient clipping
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    torch.nn.utils.clip_grad_norm_(model.region.parameters(), 1.0)
     optimizer.step()
     lr_val = lr_schedule(num_steps, NUM_EPOCHS * len(train_ds) / BATCH_SIZE)
     for param_group in optimizer.param_groups:
@@ -280,14 +279,14 @@ def main():
         model._setup_caches()
 
     optimizer = AdamW(
-        [{"params": model.parameters()}],
+        [{"params": model.region.parameters()}],
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         betas=(0.9, 0.95),
         eps=1e-6,
     )
 
-    num_params = sum(p.numel() for p in model.parameters())
+    num_params = sum(p.numel() for p in model.region.parameters())
     logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")

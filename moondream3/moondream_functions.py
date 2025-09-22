@@ -160,7 +160,8 @@ def _prefill_prompt_grad(
     pos_ids = torch.arange(
         pos, pos + prompt_emb.size(1), dtype=torch.long, device=model.device
     )
-    hidden_BC = _prefill(model, prompt_emb, mask, pos_ids, lora)
+    # Detach to prevent building grads through text decoder / KV cache
+    hidden_BC = _prefill(model, prompt_emb, mask, pos_ids, lora).detach()
     logits_BV = lm_head(hidden_BC, model.text)
 
     if temperature == 0:
@@ -316,6 +317,8 @@ def _generate_points_grad(
     out_logprobs: List[torch.Tensor] = []
     mask = torch.zeros(1, 1, 4096, device=model.device, dtype=torch.bool)
     mask[:, :, :pos] = 1
+    # Never backprop through the text decoder/KV caches
+    hidden = hidden.detach()
 
     while next_token.item() != model.config.tokenizer.eos_id and len(out) < max_objects:
         # X coordinate
@@ -335,10 +338,13 @@ def _generate_points_grad(
             x_center.unsqueeze(-1).to(dtype=x_logits.dtype), model.region
         )
 
-        mask[:, :, pos] = 1
-        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+        # Advance the text state without tracking autograd
+        with torch.no_grad():
+            mask[:, :, pos] = 1
+            pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+            _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
         pos += 1
+        hidden = hidden.detach()
 
         # Y coordinate
         y_logits = decode_coordinate(hidden, model.region)
@@ -358,10 +364,12 @@ def _generate_points_grad(
         )
 
         if include_size:
-            mask[:, :, pos] = 1
-            pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-            _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+            with torch.no_grad():
+                mask[:, :, pos] = 1
+                pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+                _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
             pos += 1
+            hidden = hidden.detach()
             size_logits = decode_size(hidden, model.region)
 
             if temperature > 0:
@@ -421,10 +429,13 @@ def _generate_points_grad(
             )
             out_logits.extend([x_logit, y_logit])
 
-        mask[:, :, pos] = 1
-        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        logits, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+        with torch.no_grad():
+            mask[:, :, pos] = 1
+            pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+            logits, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
         pos += 1
+        # logits used only for argmax; keep hidden detached
+        hidden = hidden.detach()
         next_token = torch.argmax(logits, dim=-1)
 
     return out, out_logits, out_logprobs

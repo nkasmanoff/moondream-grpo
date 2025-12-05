@@ -1,24 +1,37 @@
 import numpy as np
 import torch
 from torch.optim import AdamW
-from moondream.moondream_functions import detect, detect_grad
-from moondream.refcoco_dataset import load_object_detection_dataset
-from moondream.rl_utils import (
+from moondream2.refcoco_dataset import load_object_detection_dataset
+from moondream2.rl_utils import (
     calculate_rewards,
     match_boxes_score,
 )
-from moondream.moondream import MoondreamModel, MoondreamConfig
+
+MD_VERSION = "3"
+if MD_VERSION == "3":
+    from moondream3.moondream import MoondreamModel, MoondreamConfig
+    from moondream3.moondream_functions import detect, detect_grad
+
+    safetensors_path = "models/model_md3.safetensors"
+elif MD_VERSION == "2":
+    from moondream2.moondream import MoondreamModel, MoondreamConfig
+    from moondream2.moondream_functions import detect, detect_grad
+
+    safetensors_path = "moondream2/model.safetensors"
+
+else:
+    raise ValueError(f"Invalid MD_VERSION: {MD_VERSION}")
 from safetensors.torch import load_file
-from moondream.rl_utils import calculate_grpo_loss
+from moondream2.rl_utils import calculate_grpo_loss
 from safetensors.torch import save_file
 import wandb
 import logging
-from moondream.visualization_utils import plot_prediction
+from moondream2.visualization_utils import plot_prediction
 import os
 import math
 
 
-OVERFIT_TRAIN = True
+OVERFIT_TRAIN = False
 NUM_EPOCHS = 1 if not OVERFIT_TRAIN else 50
 BATCH_SIZE = 3
 NUM_ROLLOUTS = 3
@@ -27,9 +40,8 @@ WEIGHT_DECAY = 1e-8
 TRAIN_STEPS = 1
 CONSTANT_LR = False if not OVERFIT_TRAIN else True
 EVAL_INTERVAL = 1
-VALIDATION_SAMPLES = 3
-MAX_PLOT_SAMPLES = 3
-safetensors_path = "moondream/model.safetensors"
+VALIDATION_SAMPLES = 250
+MAX_PLOT_SAMPLES = 25
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 # Rollout warning
@@ -171,7 +183,7 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
         return 0
     total_loss.backward()
     # apply gradient clipping
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    torch.nn.utils.clip_grad_norm_(model.region.parameters(), 1.0)
     optimizer.step()
     lr_val = lr_schedule(num_steps, NUM_EPOCHS * len(train_ds) / BATCH_SIZE)
     for param_group in optimizer.param_groups:
@@ -255,20 +267,26 @@ def main():
         },
     )
     num_steps = 0
-    model = MoondreamModel(config=MoondreamConfig(), setup_caches=True)
+    if MD_VERSION == "3":
+        setup_caches = False
+    else:
+        setup_caches = True
+    model = MoondreamModel(config=MoondreamConfig(), setup_caches=setup_caches)
     model.to(device)
-
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
+    if MD_VERSION == "3":
+        model._setup_caches()
+
     optimizer = AdamW(
-        [{"params": model.parameters()}],
+        [{"params": model.region.parameters()}],
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         betas=(0.9, 0.95),
         eps=1e-6,
     )
 
-    num_params = sum(p.numel() for p in model.parameters())
+    num_params = sum(p.numel() for p in model.region.parameters())
     logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")

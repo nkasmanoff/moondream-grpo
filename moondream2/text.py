@@ -88,7 +88,8 @@ def _attn(
         .transpose(1, 2)
     )
 
-    position_ids = torch.arange(pos, pos + q_len, dtype=torch.long)
+    # Create position_ids on the same device as x
+    position_ids = torch.arange(pos, pos + q_len, dtype=torch.long, device=x.device)
     q = apply_rotary_emb(q, freqs_cis, position_ids, n_heads)
     k = apply_rotary_emb(k, freqs_cis, position_ids, n_kv_heads)
     out = F.scaled_dot_product_attention(
@@ -103,7 +104,8 @@ def _produce_hidden(inputs_embeds: torch.Tensor, w: nn.Module, config: TextConfi
     hidden_BTC = inputs_embeds
 
     bsz, q_len, d_model = inputs_embeds.shape
-    attn_mask = torch.zeros(q_len, q_len)
+    # Create attn_mask on the same device as inputs_embeds
+    attn_mask = torch.zeros(q_len, q_len, device=inputs_embeds.device)
     attn_mask[:730, :730] = 1
     for i in range(730, q_len):
         attn_mask[i, : i + 1] = 1

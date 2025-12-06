@@ -24,8 +24,17 @@ def fourier_features(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
 
     Returns:
         Concatenated cosine and sine transformed features as a tensor
+
+    Notes:
+        Ensures that the input tensor has the same dtype and device as the frequency
+        matrix, so callers can pass in plain float coordinates (e.g., float32) even
+        when the model weights are in bfloat16.
     """
-    f = 2 * math.pi * x @ w
+    # Match dtype and device of the frequency matrix to avoid matmul dtype errors
+    if x.dtype != w.dtype or x.device != w.device:
+        x = x.to(device=w.device, dtype=w.dtype)
+
+    f = 2 * math.pi * (x @ w)
     return torch.cat([f.cos(), f.sin()], dim=-1)
 
 

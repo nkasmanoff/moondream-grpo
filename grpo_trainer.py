@@ -1,13 +1,13 @@
 import numpy as np
 import torch
 from torch.optim import AdamW
-from moondream2.refcoco_dataset import load_object_detection_dataset
+from datasets.basketball_dataset import load_object_detection_dataset
 from moondream2.rl_utils import (
     calculate_rewards,
     match_boxes_score,
 )
 
-MD_VERSION = "3"
+MD_VERSION = "2"
 if MD_VERSION == "3":
     from moondream3.moondream import MoondreamModel, MoondreamConfig
     from moondream3.moondream_functions import detect, detect_grad
@@ -196,9 +196,12 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
     model.eval()
     TP = FP = FN = 0
 
+    # Use the minimum of max_samples and the actual dataset size
+    num_samples = min(max_samples, len(val_ds))
+
     images = []
     with torch.no_grad():
-        for i in range(max_samples):
+        for i in range(num_samples):
             sample = val_ds[i]
             detections = detect(model, sample[0], sample[1], None, temperature=0)
             tp, fp, fn = match_boxes_score(detections["objects"], sample[2])
@@ -229,8 +232,11 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
 
 
 def validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES):
+    # Use the minimum of max_samples and the actual dataset size
+    num_samples = min(max_samples, len(val_ds))
+
     TP = FP = FN = 0
-    for i in range(max_samples):
+    for i in range(num_samples):
         sample = val_ds[i]
         detections = {"objects": sample[2]}
         tp, fp, fn = match_boxes_score(detections["objects"], sample[2])
@@ -252,7 +258,7 @@ def main():
     )
     os.makedirs("predictions", exist_ok=True)
     wandb.init(
-        project="moondream-refcoco-detection",
+        project="moondream-basketball-detection",
         config={
             "learning_rate": LEARNING_RATE,
             "epochs": NUM_EPOCHS,
@@ -264,6 +270,7 @@ def main():
             "weight_decay": WEIGHT_DECAY,
             "eval_interval": EVAL_INTERVAL,
             "constant_lr": CONSTANT_LR,
+            "dataset": "basketball-ball-detection",
         },
     )
     num_steps = 0
@@ -292,8 +299,15 @@ def main():
     train_ds = load_object_detection_dataset("train")
     val_split = "val" if not OVERFIT_TRAIN else "train"
     val_ds = load_object_detection_dataset(val_split)
+
+    logging.info(f"Train dataset size: {len(train_ds)}")
+    logging.info(f"Val dataset size: {len(val_ds)}")
+    logging.info(f"Validation will use {min(VALIDATION_SAMPLES, len(val_ds))} samples")
     gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
     logging.info(f"GT validation f1: {round(gt_validation_score['f1'], 4)}")
+    logging.info(
+        f"Validation will use {min(VALIDATION_SAMPLES, len(val_ds))} samples. Now running initial validation."
+    )
     initial_validation_score = validate(
         model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
     )
@@ -353,10 +367,7 @@ def main():
                         os.makedirs("models")
 
                     model_path = f"models/grpo_model_{num_steps}.safetensors"
-                    # save_file(
-                    #     model.state_dict(),
-                    #     model_path,
-                    # )
+                    save_file(model.state_dict(), model_path)
                     logging.info(f"Saved model to {model_path}")
             logging.info(
                 f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"

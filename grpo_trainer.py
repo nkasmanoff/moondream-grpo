@@ -211,7 +211,7 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
                 try:
                     fig = plot_prediction(detections, sample)
                     fig_path = f"predictions/prediction_{i}.png"
-                    fig.savefig(fig_path, dpi=100, bbox_inches='tight')
+                    fig.savefig(fig_path, dpi=100, bbox_inches="tight")
                     plt.close(fig)  # Free up memory
                     images.append(wandb.Image(fig_path))
                 except Exception as e:
@@ -219,14 +219,14 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
             TP += tp
             FP += fp
             FN += fn
-    
+
     # Only log images if we have any
     if images:
         try:
             wandb.log({"predictions": images[-MAX_PLOT_SAMPLES:]}, step=step)
         except Exception as e:
             logging.warning(f"Failed to log prediction images to wandb: {e}")
-    
+
     model.train()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -292,11 +292,20 @@ def main():
     else:
         setup_caches = True
     model = MoondreamModel(config=MoondreamConfig(), setup_caches=setup_caches)
-    model.to(device)
+
+    # Load weights before moving to device
     state_dict = load_file(safetensors_path)
     model.load_state_dict(state_dict)
+
+    # Move model to device
+    model.to(device)
+
     if MD_VERSION == "3":
         model._setup_caches()
+
+    # Ensure all buffers are on the correct device
+    for buffer in model.buffers():
+        buffer.data = buffer.data.to(device)
 
     optimizer = AdamW(
         [{"params": model.region.parameters()}],

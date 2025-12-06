@@ -56,12 +56,12 @@ from moondream2.visualization_utils import plot_prediction
 
 
 # This is a intended to be a basic starting point. Your optimal hyperparams and data may be different.
-LR = 1e-5
-EPOCHS = 1
-GRAD_ACCUM_STEPS = 1
+LR = 5e-4
+EPOCHS = 3
+GRAD_ACCUM_STEPS = 4
 VALIDATION_SAMPLES = 250
 MAX_PLOT_SAMPLES = 25
-EVAL_INTERVAL = 100  # Evaluate every N gradient accumulation steps
+EVAL_INTERVAL = 50  # Evaluate every N gradient accumulation steps
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 

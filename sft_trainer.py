@@ -10,6 +10,7 @@ from safetensors.torch import save_file
 import datasets
 import logging
 import os
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from torch.optim import AdamW
@@ -301,14 +302,25 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
 
             # plot sample
             if i < MAX_PLOT_SAMPLES:
-                fig = plot_prediction(detections, sample)
-                fig.savefig(f"predictions/prediction_{i}.png")
-                images.append(wandb.Image(f"predictions/prediction_{i}.png"))
+                try:
+                    fig = plot_prediction(detections, sample)
+                    fig_path = f"predictions/prediction_{i}.png"
+                    fig.savefig(fig_path, dpi=100, bbox_inches='tight')
+                    plt.close(fig)  # Free up memory
+                    images.append(wandb.Image(fig_path))
+                except Exception as e:
+                    logging.warning(f"Failed to save prediction image {i}: {e}")
             TP += tp
             FP += fp
             FN += fn
 
-    wandb.log({"predictions": images[-MAX_PLOT_SAMPLES:]}, step=step)
+    # Only log images if we have any
+    if images:
+        try:
+            wandb.log({"predictions": images[-MAX_PLOT_SAMPLES:]}, step=step)
+        except Exception as e:
+            logging.warning(f"Failed to log prediction images to wandb: {e}")
+    
     model.train()
 
     if torch.cuda.is_available():

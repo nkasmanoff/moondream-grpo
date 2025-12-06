@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 from torch.optim import AdamW
 from datasets.basketball_dataset import load_object_detection_dataset
 from moondream2.rl_utils import (
@@ -207,13 +208,25 @@ def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
             tp, fp, fn = match_boxes_score(detections["objects"], sample[2])
             # plot sample
             if i < MAX_PLOT_SAMPLES:
-                fig = plot_prediction(detections, sample)
-                fig.savefig(f"predictions/prediction_{i}.png")
-                images.append(wandb.Image(f"predictions/prediction_{i}.png"))
+                try:
+                    fig = plot_prediction(detections, sample)
+                    fig_path = f"predictions/prediction_{i}.png"
+                    fig.savefig(fig_path, dpi=100, bbox_inches='tight')
+                    plt.close(fig)  # Free up memory
+                    images.append(wandb.Image(fig_path))
+                except Exception as e:
+                    logging.warning(f"Failed to save prediction image {i}: {e}")
             TP += tp
             FP += fp
             FN += fn
-    wandb.log({"predictions": images[-MAX_PLOT_SAMPLES:]}, step=step)
+    
+    # Only log images if we have any
+    if images:
+        try:
+            wandb.log({"predictions": images[-MAX_PLOT_SAMPLES:]}, step=step)
+        except Exception as e:
+            logging.warning(f"Failed to log prediction images to wandb: {e}")
+    
     model.train()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

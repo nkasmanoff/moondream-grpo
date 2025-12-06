@@ -303,9 +303,36 @@ def main():
     if MD_VERSION == "3":
         model._setup_caches()
 
-    # Ensure all buffers are on the correct device
-    for buffer in model.buffers():
+    # Ensure all buffers and parameters are on the correct device
+    for name, buffer in model.named_buffers():
         buffer.data = buffer.data.to(device)
+
+    # Also explicitly move submodules
+    model.text.to(device)
+    model.vision.to(device)
+    model.region.to(device)
+
+    # Force all parameters to device
+    for param in model.parameters():
+        param.data = param.data.to(device)
+        if param._grad is not None:
+            param._grad.data = param._grad.data.to(device)
+
+    # Verify all tensors are on the correct device
+    device_str = str(device)
+    for name, param in model.named_parameters():
+        if str(param.device) != device_str:
+            logging.warning(
+                f"Parameter {name} is on {param.device}, moving to {device}"
+            )
+            param.data = param.data.to(device)
+
+    for name, buffer in model.named_buffers():
+        if str(buffer.device) != device_str:
+            logging.warning(f"Buffer {name} is on {buffer.device}, moving to {device}")
+            buffer.data = buffer.data.to(device)
+
+    logging.info(f"Model successfully loaded and moved to {device}")
 
     optimizer = AdamW(
         [{"params": model.region.parameters()}],

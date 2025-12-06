@@ -58,7 +58,7 @@ from moondream2.visualization_utils import plot_prediction
 # This is a intended to be a basic starting point. Your optimal hyperparams and data may be different.
 LR = 1e-5
 EPOCHS = 1
-GRAD_ACCUM_STEPS = 128
+GRAD_ACCUM_STEPS = 1
 VALIDATION_SAMPLES = 250
 MAX_PLOT_SAMPLES = 25
 EVAL_INTERVAL = 100  # Evaluate every N gradient accumulation steps
@@ -129,7 +129,8 @@ class WasteDetection(Dataset):
                 flat_boxes.append(b)  # x, y, w, h , normalized to 0-1
                 class_names.append(label)
 
-        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float16)
+        # Use float32 for better numerical stability and compatibility
+        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
         image_id = torch.tensor([idx], dtype=torch.int64)
 
         return {
@@ -202,7 +203,8 @@ class BasketballDetection(Dataset):
             flat_boxes.append([x, y, w, h])
             class_names.append(label)
 
-        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float16)
+        # Use float32 for better numerical stability and compatibility
+        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
         image_id = torch.tensor([idx], dtype=torch.int64)
 
         return {
@@ -245,7 +247,8 @@ class RefCocoDetection(Dataset):
             flat_boxes.append([x, y, w, h])
             class_names.append(label)
 
-        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float16)
+        # Use float32 for better numerical stability and compatibility
+        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
         image_id = torch.tensor([idx], dtype=torch.int64)
 
         return {
@@ -408,9 +411,36 @@ def main():
     if MD_VERSION == "3":
         model._setup_caches()
 
-    # Ensure all buffers are on the correct device
-    for buffer in model.buffers():
+    # Ensure all buffers and parameters are on the correct device
+    for name, buffer in model.named_buffers():
         buffer.data = buffer.data.to(device)
+
+    # Also explicitly move submodules
+    model.text.to(device)
+    model.vision.to(device)
+    model.region.to(device)
+
+    # Force all parameters to device
+    for param in model.parameters():
+        param.data = param.data.to(device)
+        if param._grad is not None:
+            param._grad.data = param._grad.data.to(device)
+
+    # Verify all tensors are on the correct device
+    device_str = str(device)
+    for name, param in model.named_parameters():
+        if str(param.device) != device_str:
+            logging.warning(
+                f"Parameter {name} is on {param.device}, moving to {device}"
+            )
+            param.data = param.data.to(device)
+
+    for name, buffer in model.named_buffers():
+        if str(buffer.device) != device_str:
+            logging.warning(f"Buffer {name} is on {buffer.device}, moving to {device}")
+            buffer.data = buffer.data.to(device)
+
+    logging.info(f"Model successfully loaded and moved to {device}")
 
     num_params = sum(p.numel() for p in model.parameters())
     logging.info(f"Number of parameters: {num_params:,}")
@@ -494,8 +524,8 @@ def main():
                 c_idx = []
                 s_idx = []
                 for bb in boxes_list:
-                    # set device of bb to model.device
-                    bb = bb.to(dtype=torch.bfloat16, device=model.device)
+                    # Move boxes to model device (already float32 from dataset)
+                    bb = bb.to(device=model.device)
                     l_cs = len(cs_emb)
                     cs_emb.extend(
                         [

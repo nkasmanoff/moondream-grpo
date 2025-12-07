@@ -617,6 +617,16 @@ def main():
             target_modules=LORA_TARGET_MODULES,
         )
 
+        # Freeze all parameters, then unfreeze only LoRA weights.
+        # This ensures we're really doing LoRA-style fine-tuning, not (almost) full fine-tuning.
+        for param in model.parameters():
+            param.requires_grad = False
+
+        for module in model.modules():
+            if isinstance(module, LoRALinear):
+                module.lora_A.requires_grad = True
+                module.lora_B.requires_grad = True
+
         # Count total and trainable parameters
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -178,10 +178,15 @@ def teacher_forced_region_loss(
         n_terms += 1
 
         # Teacher-force x embedding and advance decoder (y will see this)
-        x_center_tensor = x_center.view(1, 1, 1).to(
-            dtype=x_logits.dtype, device=model.device
+        # Shape here should match Moondream's own `_generate_points_grad`:
+        # x_center.unsqueeze(-1) -> (1, 1, 1), then encode_coordinate -> (1, 1, dim)
+        x_center_tensor = (
+            x_center.unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(-1)
+            .to(dtype=x_logits.dtype, device=model.device)
         )
-        next_emb = encode_coordinate(x_center_tensor, model.region).unsqueeze(0)
+        next_emb = encode_coordinate(x_center_tensor, model.region)
         mask[:, :, pos] = 1
         pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
         _, hidden = model._decode_one_tok(next_emb, mask, pos_ids, lora=None)
@@ -199,10 +204,13 @@ def teacher_forced_region_loss(
         n_terms += 1
 
         # Teacher-force y embedding and advance decoder (size will see this)
-        y_center_tensor = y_center.view(1, 1, 1).to(
-            dtype=y_logits.dtype, device=model.device
+        y_center_tensor = (
+            y_center.unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(-1)
+            .to(dtype=y_logits.dtype, device=model.device)
         )
-        next_emb = encode_coordinate(y_center_tensor, model.region).unsqueeze(0)
+        next_emb = encode_coordinate(y_center_tensor, model.region)
         mask[:, :, pos] = 1
         pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
         _, hidden = model._decode_one_tok(next_emb, mask, pos_ids, lora=None)

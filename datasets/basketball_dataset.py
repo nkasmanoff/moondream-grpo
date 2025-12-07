@@ -140,7 +140,7 @@ class BasketballDetection(Dataset):
             w = box["x_max"] - box["x_min"]
             h = box["y_max"] - box["y_min"]
             flat_boxes.append([x, y, w, h])
-            class_names.append(self.categories_to_use[label.replace("-", " ")])
+            class_names.append(label.replace("-", " "))
 
         # Use float32 for better numerical stability and compatibility
         flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)

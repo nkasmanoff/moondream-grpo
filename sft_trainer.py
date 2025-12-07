@@ -221,13 +221,13 @@ def teacher_forced_region_loss(
 
 
 def main(
-    lr: float = 5e-6,
-    epochs: int = 3,
-    grad_accum_steps: int = 32,
+    lr: float = 5e-5,
+    epochs: int = 5,
+    grad_accum_steps: int = 64,
     validation_samples: int = 250,
     eval_interval: int = 5,
     overfit_batch_size: Optional[int] = None,
-    use_lora: bool = False,
+    use_lora: bool = True,
     lora_rank: int = 32,
     lora_alpha: int = 64,
     lora_dropout: float = 0.1,
@@ -520,9 +520,8 @@ def main(
             "final_test_f1": test_score["f1"],
             "final_test_precision": test_score["precision"],
             "final_test_recall": test_score["recall"],
-            "best_validation_step": best_validation_step,
         },
-        step=best_validation_step,
+        step=0,
     )
     wandb.finish()
 

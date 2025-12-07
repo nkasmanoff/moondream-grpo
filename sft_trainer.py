@@ -57,11 +57,12 @@ from moondream2.visualization_utils import plot_prediction
 
 # This is a intended to be a basic starting point. Your optimal hyperparams and data may be different.
 LR = 5e-4
-EPOCHS = 3
-GRAD_ACCUM_STEPS = 4
+EPOCHS = 10
+GRAD_ACCUM_STEPS = 1
 VALIDATION_SAMPLES = 250
 MAX_PLOT_SAMPLES = 25
 EVAL_INTERVAL = 50  # Evaluate every N gradient accumulation steps
+OVERFIT_BATCH_SIZE = 4  # Set to a number > 0 to overfit on a small batch
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 
@@ -387,6 +388,7 @@ def main():
             "LR": LR,
             "VALIDATION_SAMPLES": VALIDATION_SAMPLES,
             "EVAL_INTERVAL": EVAL_INTERVAL,
+            "OVERFIT_BATCH_SIZE": OVERFIT_BATCH_SIZE,
             "dataset": "basketball-ball-detection",
             "md_version": MD_VERSION,
         },
@@ -454,6 +456,22 @@ def main():
     dataset = BasketballDetection(split="train")
     val_dataset = BasketballDetection(split="val")
 
+    # Handle overfit batch size
+    if OVERFIT_BATCH_SIZE is not None and OVERFIT_BATCH_SIZE > 0:
+        logging.info(
+            f"Overfitting mode enabled: using first {OVERFIT_BATCH_SIZE} training samples for both train and val"
+        )
+        # Limit the dataset to first N samples by modifying the underlying dataset
+        train_full = BasketballDetection(split="train")
+        # Truncate the underlying COCO dataset
+        train_full.dataset.image_ids = train_full.dataset.image_ids[:OVERFIT_BATCH_SIZE]
+        dataset = train_full
+
+        # Use the same subset for validation
+        val_full = BasketballDetection(split="train")
+        val_full.dataset.image_ids = val_full.dataset.image_ids[:OVERFIT_BATCH_SIZE]
+        val_dataset = val_full
+
     logging.info(f"Train dataset size: {len(dataset)}")
     logging.info(f"Val dataset size: {len(val_dataset)}")
     logging.info(
@@ -509,13 +527,17 @@ def main():
             for box, cls in zip(sample["boxes"], sample["class_names"]):
                 boxes_by_class.setdefault(cls, []).append(box)
 
-            total_loss = 0.0
+            total_loss = None
             for class_name, boxes_list in boxes_by_class.items():
                 with torch.no_grad():
                     instruction = f"\n\nDetect: {class_name}\n\n"
                     instruction_tokens = model.tokenizer.encode(instruction).ids
                     instruction_emb = text_encoder(
-                        torch.tensor([[instruction_tokens]], device=model.device),
+                        torch.tensor(
+                            [[instruction_tokens]],
+                            dtype=torch.long,
+                            device=model.device,
+                        ),
                         model.text,
                     ).squeeze(0)
 
@@ -539,7 +561,8 @@ def main():
 
                     # Create coordinate bin labels
                     coord_labels = [
-                        min(max(torch.round(p * 1023), 0), 1023).item() for p in bb[:2]
+                        int(min(max(torch.round(p * 1023), 0), 1023).item())
+                        for p in bb[:2]
                     ]
 
                     # Create size bin labels using log-scale mapping
@@ -565,8 +588,12 @@ def main():
                     dim=1,
                 )
                 prefix = inputs_embeds.size(1) - cs_emb.size(0)
-                c_idx = torch.tensor(c_idx, device=model.device) + prefix
-                s_idx = torch.tensor(s_idx, device=model.device) + prefix
+                c_idx = (
+                    torch.tensor(c_idx, dtype=torch.long, device=model.device) + prefix
+                )
+                s_idx = (
+                    torch.tensor(s_idx, dtype=torch.long, device=model.device) + prefix
+                )
 
                 hidden = _produce_hidden(
                     inputs_embeds=inputs_embeds, w=model.text, config=model.config.text
@@ -581,9 +608,13 @@ def main():
                     c_idx=c_idx,
                     s_idx=s_idx,
                 )
-                total_loss += loss
+                if total_loss is None:
+                    total_loss = loss
+                else:
+                    total_loss = total_loss + loss
 
-            total_loss.backward()
+            if total_loss is not None:
+                total_loss.backward()
 
             if i % GRAD_ACCUM_STEPS == 0:
                 optimizer.step()
@@ -594,12 +625,13 @@ def main():
                     param_group["lr"] = lr_val
 
                 current_step = i // GRAD_ACCUM_STEPS
-                pbar.set_postfix({"step": current_step, "loss": total_loss.item()})
+                loss_val = total_loss.item() if total_loss is not None else 0.0
+                pbar.set_postfix({"step": current_step, "loss": loss_val})
                 pbar.update(1)
 
                 wandb.log(
                     {
-                        "loss/train": total_loss.item(),
+                        "loss/train": loss_val,
                         "lr": optimizer.param_groups[0]["lr"],
                         "epoch": epoch,
                     },

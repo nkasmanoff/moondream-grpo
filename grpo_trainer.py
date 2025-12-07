@@ -1,3 +1,29 @@
+"""
+GRPO (Group Relative Policy Optimization) trainer for Moondream.
+
+This trainer uses reinforcement learning to fine-tune the region head by:
+- Collecting rollouts with multiple detections per sample
+- Computing rewards based on detection quality
+- Using GRPO loss to update the model based on advantages
+
+Usage Examples:
+---------------
+Basic training with default hyperparameters:
+    python grpo_trainer.py
+
+Training with custom learning rate and batch size:
+    python grpo_trainer.py --learning_rate=5e-5 --batch_size=5
+
+Training with more rollouts:
+    python grpo_trainer.py --num_rollouts=5 --num_epochs=3
+
+Training with overfitting mode:
+    python grpo_trainer.py --overfit_train=True --num_epochs=50
+
+Training with Moondream 3:
+    python grpo_trainer.py --md_version=3
+"""
+
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -6,72 +32,40 @@ from datasets.basketball_dataset import load_object_detection_dataset
 from moondream2.rl_utils import (
     calculate_rewards,
     match_boxes_score,
+    calculate_grpo_loss,
 )
-
-MD_VERSION = "2"
-if MD_VERSION == "3":
-    from moondream3.moondream import MoondreamModel, MoondreamConfig
-    from moondream3.moondream_functions import detect, detect_grad
-
-    safetensors_path = "models/model_md3.safetensors"
-elif MD_VERSION == "2":
-    from moondream2.moondream import MoondreamModel, MoondreamConfig
-    from moondream2.moondream_functions import detect, detect_grad
-
-    safetensors_path = "moondream2/model.safetensors"
-
-else:
-    raise ValueError(f"Invalid MD_VERSION: {MD_VERSION}")
-from safetensors.torch import load_file
-from moondream2.rl_utils import calculate_grpo_loss
-from safetensors.torch import save_file
+from trainer_helpers import (
+    lr_schedule,
+    validate,
+    validate_with_gt,
+)
+from safetensors.torch import load_file, save_file
 import wandb
 import logging
-from moondream2.visualization_utils import plot_prediction
 import os
-import math
+import fire
 
+# Default imports for Moondream 2 (can be overridden in main)
+from moondream2.moondream_functions import (
+    detect as _detect_md2,
+    detect_grad as _detect_grad_md2,
+)
 
-OVERFIT_TRAIN = False
-NUM_EPOCHS = 1 if not OVERFIT_TRAIN else 50
-BATCH_SIZE = 3
-NUM_ROLLOUTS = 3
-LEARNING_RATE = 1e-4
-WEIGHT_DECAY = 1e-8
-TRAIN_STEPS = 1
-CONSTANT_LR = False if not OVERFIT_TRAIN else True
-EVAL_INTERVAL = 1
-VALIDATION_SAMPLES = 250
-MAX_PLOT_SAMPLES = 25
+# Module-level variables that can be reassigned based on md_version
+detect = _detect_md2
+detect_grad = _detect_grad_md2
+
 device = "cuda" if torch.cuda.is_available() else "mps"
 
-# Rollout warning
 
-if NUM_ROLLOUTS == 1:
-    raise ValueError("NUM_ROLLOUTS must be greater than 1")
-
-
-def lr_schedule(step, max_steps, constant=CONSTANT_LR):
-    if constant:
-        return LEARNING_RATE
-    x = step / max_steps
-    if x < 0.1:
-        return 0.1 * LEARNING_RATE + 0.9 * LEARNING_RATE * x / 0.1
-    else:
-        return (
-            0.1 * LEARNING_RATE
-            + 0.9 * LEARNING_RATE * (1 + math.cos(math.pi * (x - 0.1))) / 2
-        )
-
-
-def collect_experience(train_ds, model, start_idx):
+def collect_experience(train_ds, model, start_idx, batch_size, num_rollouts):
     experience = []
-    for i in range(BATCH_SIZE):
+    for i in range(batch_size):
         sample = train_ds[start_idx + i]
 
         trajectory_detections = []
 
-        for _ in range(NUM_ROLLOUTS):
+        for _ in range(num_rollouts):
             detections = detect(model, sample[0], sample[1], None, temperature=1.5)
             if len(detections["objects"]) == 0:
                 # if no objects detected, skip this trajectory
@@ -111,11 +105,23 @@ def collect_experience(train_ds, model, start_idx):
     return experience, trajectory_detections
 
 
-def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
+def train_step(
+    experience,
+    model,
+    optimizer,
+    train_ds,
+    start_idx,
+    batch_size,
+    learning_rate,
+    num_epochs,
+    train_ds_len,
+    constant_lr,
+    num_steps=0,
+):
     optimizer.zero_grad()
     total_loss = 0
 
-    for i in range(BATCH_SIZE):
+    for i in range(batch_size):
         sample = train_ds[start_idx + i]
 
         new_predictions = detect_grad(model, sample[0], sample[1], None, temperature=0)
@@ -173,7 +179,7 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
         grpo_loss = calculate_grpo_loss(
             new_logprobs, old_logprobs, advantages, attention_mask
         )
-        loss = grpo_loss / BATCH_SIZE
+        loss = grpo_loss / batch_size
         total_loss += loss
 
     if isinstance(total_loss, int):
@@ -186,111 +192,115 @@ def train_step(experience, model, optimizer, train_ds, start_idx, num_steps=0):
     # apply gradient clipping
     torch.nn.utils.clip_grad_norm_(model.region.parameters(), 1.0)
     optimizer.step()
-    lr_val = lr_schedule(num_steps, NUM_EPOCHS * len(train_ds) / BATCH_SIZE)
+    lr_val = lr_schedule(
+        num_steps,
+        num_epochs * train_ds_len / batch_size,
+        base_lr=learning_rate,
+        constant=constant_lr,
+    )
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr_val
 
-    return total_loss.item() / BATCH_SIZE
+    return total_loss.item() / batch_size
 
 
-def validate(model, val_ds, step, max_samples=VALIDATION_SAMPLES):
-    model.eval()
-    TP = FP = FN = 0
+def main(
+    learning_rate: float = 1e-4,
+    num_epochs: int = 1,
+    batch_size: int = 3,
+    num_rollouts: int = 3,
+    train_steps: int = 1,
+    validation_samples: int = 250,
+    max_plot_samples: int = 25,
+    overfit_train: bool = False,
+    weight_decay: float = 1e-8,
+    eval_interval: int = 1,
+    constant_lr: bool = False,
+    md_version: str = "2",
+    wandb_project: str = "moondream-basketball-detection",
+    dataset_name: str = "basketball-ball-detection",
+):
+    """
+    Main GRPO training function with configurable hyperparameters via Fire CLI.
 
-    # Use the minimum of max_samples and the actual dataset size
-    num_samples = min(max_samples, len(val_ds))
+    Args:
+        learning_rate: Learning rate (default: 1e-4)
+        num_epochs: Number of training epochs (default: 1, or 50 if overfit_train=True)
+        batch_size: Batch size for training (default: 3)
+        num_rollouts: Number of rollouts per sample (default: 3, must be > 1)
+        train_steps: Number of training steps per batch (default: 1)
+        validation_samples: Number of samples to use for validation (default: 250)
+        max_plot_samples: Maximum number of samples to plot during validation (default: 25)
+        overfit_train: Whether to overfit on training set (default: False)
+        weight_decay: Weight decay for optimizer (default: 1e-8)
+        eval_interval: Evaluate every N steps (default: 1)
+        constant_lr: Whether to use constant learning rate (default: False)
+        md_version: Moondream version ("2" or "3") (default: "2")
+        wandb_project: Weights & Biases project name (default: "moondream-basketball-detection")
+        dataset_name: Dataset name for wandb logging (default: "basketball-ball-detection")
+    """
+    # Rollout warning
+    if num_rollouts == 1:
+        raise ValueError("num_rollouts must be greater than 1")
 
-    images = []
-    with torch.no_grad():
-        for i in range(num_samples):
-            sample = val_ds[i]
-            detections = detect(model, sample[0], sample[1], None, temperature=0)
-            tp, fp, fn = match_boxes_score(detections["objects"], sample[2])
-            # plot sample
-            if i < MAX_PLOT_SAMPLES:
-                try:
-                    fig = plot_prediction(detections, sample)
-                    fig_path = f"predictions/prediction_{i}.png"
-                    fig.savefig(fig_path, dpi=100, bbox_inches="tight")
-                    plt.close(fig)  # Free up memory
-                    images.append(wandb.Image(fig_path))
-                except Exception as e:
-                    logging.warning(f"Failed to save prediction image {i}: {e}")
-            TP += tp
-            FP += fp
-            FN += fn
+    # Adjust epochs based on overfit_train if not explicitly set
+    if overfit_train and num_epochs == 1:
+        num_epochs = 50
 
-    # Only log images if we have any
-    if images:
-        try:
-            wandb.log({"predictions": images[-MAX_PLOT_SAMPLES:]}, step=step)
-        except Exception as e:
-            logging.warning(f"Failed to log prediction images to wandb: {e}")
+    # Adjust constant_lr based on overfit_train if not explicitly set
+    if overfit_train and not constant_lr:
+        constant_lr = True
 
-    model.train()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    if TP + FP == 0:
-        precision = 0.0
-        recall = 0.0
-    else:
-        precision = TP / (TP + FP)
-        recall = TP / (TP + FN)
-    if precision + recall == 0:
-        f1 = 0.0
-    else:
-        f1 = 2 * (precision * recall) / (precision + recall)
-
-    return {"precision": precision, "recall": recall, "f1": f1}
-
-
-def validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES):
-    # Use the minimum of max_samples and the actual dataset size
-    num_samples = min(max_samples, len(val_ds))
-
-    TP = FP = FN = 0
-    for i in range(num_samples):
-        sample = val_ds[i]
-        detections = {"objects": sample[2]}
-        tp, fp, fn = match_boxes_score(detections["objects"], sample[2])
-        precision = tp / (tp + fp)
-        recall = tp / (tp + fn)
-        f1 = 2 * (precision * recall) / (precision + recall)
-        TP += tp
-        FP += fp
-        FN += fn
-    precision = TP / (TP + FP)
-    recall = TP / (TP + FN)
-    f1 = 2 * (precision * recall) / (precision + recall)
-    return {"precision": precision, "recall": recall, "f1": f1}
-
-
-def main():
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
     os.makedirs("predictions", exist_ok=True)
     wandb.init(
-        project="moondream-basketball-detection",
+        project=wandb_project,
         config={
-            "learning_rate": LEARNING_RATE,
-            "epochs": NUM_EPOCHS,
-            "batch_size": BATCH_SIZE,
-            "num_rollouts": NUM_ROLLOUTS,
-            "train_steps_per_batch": TRAIN_STEPS,
-            "validation_samples": VALIDATION_SAMPLES,
-            "overfit_train": OVERFIT_TRAIN,
-            "weight_decay": WEIGHT_DECAY,
-            "eval_interval": EVAL_INTERVAL,
-            "constant_lr": CONSTANT_LR,
-            "dataset": "basketball-ball-detection",
+            "learning_rate": learning_rate,
+            "epochs": num_epochs,
+            "batch_size": batch_size,
+            "num_rollouts": num_rollouts,
+            "train_steps_per_batch": train_steps,
+            "validation_samples": validation_samples,
+            "overfit_train": overfit_train,
+            "weight_decay": weight_decay,
+            "eval_interval": eval_interval,
+            "constant_lr": constant_lr,
+            "dataset": dataset_name,
+            "md_version": md_version,
         },
     )
     num_steps = 0
-    if MD_VERSION == "3":
+
+    # Import appropriate moondream version and update module-level detect/detect_grad
+    global detect, detect_grad
+    if md_version == "3":
+        from moondream3.moondream import MoondreamModel, MoondreamConfig
+        from moondream3.moondream_functions import (
+            detect as detect_md3,
+            detect_grad as detect_grad_md3,
+        )
+
+        detect = detect_md3
+        detect_grad = detect_grad_md3
+        safetensors_path = "models/model_md3.safetensors"
         setup_caches = False
-    else:
+    elif md_version == "2":
+        from moondream2.moondream import MoondreamModel, MoondreamConfig
+        from moondream2.moondream_functions import (
+            detect as detect_md2,
+            detect_grad as detect_grad_md2,
+        )
+
+        detect = detect_md2
+        detect_grad = detect_grad_md2
+        safetensors_path = "moondream2/model.safetensors"
         setup_caches = True
+    else:
+        raise ValueError(f"Invalid md_version: {md_version}. Must be '2' or '3'")
+
     model = MoondreamModel(config=MoondreamConfig(), setup_caches=setup_caches)
 
     # Load weights before moving to device
@@ -300,7 +310,7 @@ def main():
     # Move model to device
     model.to(device)
 
-    if MD_VERSION == "3":
+    if md_version == "3":
         model._setup_caches()
 
     # Ensure all buffers and parameters are on the correct device
@@ -336,8 +346,8 @@ def main():
 
     optimizer = AdamW(
         [{"params": model.region.parameters()}],
-        lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY,
+        lr=learning_rate,
+        weight_decay=weight_decay,
         betas=(0.9, 0.95),
         eps=1e-6,
     )
@@ -346,19 +356,19 @@ def main():
     logging.info(f"Number of parameters: {num_params:,}")
 
     train_ds = load_object_detection_dataset("train")
-    val_split = "val" if not OVERFIT_TRAIN else "train"
+    val_split = "val" if not overfit_train else "train"
     val_ds = load_object_detection_dataset(val_split)
 
     logging.info(f"Train dataset size: {len(train_ds)}")
     logging.info(f"Val dataset size: {len(val_ds)}")
-    logging.info(f"Validation will use {min(VALIDATION_SAMPLES, len(val_ds))} samples")
-    gt_validation_score = validate_with_gt(val_ds, max_samples=VALIDATION_SAMPLES)
+    logging.info(f"Validation will use {min(validation_samples, len(val_ds))} samples")
+    gt_validation_score = validate_with_gt(val_ds, max_samples=validation_samples)
     logging.info(f"GT validation f1: {round(gt_validation_score['f1'], 4)}")
     logging.info(
-        f"Validation will use {min(VALIDATION_SAMPLES, len(val_ds))} samples. Now running initial validation."
+        f"Validation will use {min(validation_samples, len(val_ds))} samples. Now running initial validation."
     )
     initial_validation_score = validate(
-        model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
+        model, val_ds, step=num_steps, max_samples=validation_samples
     )
     best_validation_score = initial_validation_score["f1"]
 
@@ -376,18 +386,35 @@ def main():
         step=num_steps,
     )
 
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(num_epochs):
         num_samples = len(train_ds)
-        for start_idx in range(0, num_samples, BATCH_SIZE):
+        for start_idx in range(0, num_samples, batch_size):
             with torch.no_grad():
-                experience, _ = collect_experience(train_ds, model, start_idx)
+                experience, _ = collect_experience(
+                    train_ds, model, start_idx, batch_size, num_rollouts
+                )
 
             train_loss = train_step(
-                experience, model, optimizer, train_ds, start_idx, num_steps
+                experience,
+                model,
+                optimizer,
+                train_ds,
+                start_idx,
+                batch_size,
+                learning_rate,
+                num_epochs,
+                len(train_ds),
+                constant_lr,
+                num_steps,
             )
             num_steps += 1
             logging.info(f"Step {num_steps} complete")
-            lr_val = lr_schedule(num_steps, NUM_EPOCHS * len(train_ds) / BATCH_SIZE)
+            lr_val = lr_schedule(
+                num_steps,
+                num_epochs * len(train_ds) / batch_size,
+                base_lr=learning_rate,
+                constant=constant_lr,
+            )
 
             wandb.log(
                 {"train_loss": train_loss, "epoch": epoch, "lr": lr_val},
@@ -397,10 +424,14 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            if num_steps % EVAL_INTERVAL == 0:
+            if num_steps % eval_interval == 0:
                 logging.info(f"Evaluating at step {num_steps}")
                 validation_score = validate(
-                    model, val_ds, step=num_steps, max_samples=VALIDATION_SAMPLES
+                    model,
+                    val_ds,
+                    step=num_steps,
+                    max_samples=validation_samples,
+                    max_plot_samples=max_plot_samples,
                 )
                 logging.info(f"Validation f1: {round(validation_score['f1'], 4)}")
                 wandb.log(
@@ -421,11 +452,17 @@ def main():
             logging.info(
                 f"Epoch {epoch} batch {start_idx} loss: {round(train_loss, 4)}"
             )
-            if OVERFIT_TRAIN:
+            if overfit_train:
                 break
 
     wandb.finish()
 
 
 if __name__ == "__main__":
-    main()
+    """
+    Run with Fire CLI. Examples:
+        python grpo_trainer.py
+        python grpo_trainer.py --learning_rate=5e-5 --batch_size=5
+        python grpo_trainer.py --num_rollouts=5 --num_epochs=3
+    """
+    fire.Fire(main)

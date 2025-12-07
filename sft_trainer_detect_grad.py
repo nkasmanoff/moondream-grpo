@@ -11,9 +11,25 @@ Instead of supervising the region head on hidden states from a synthetic sequenc
 
 This is designed for Moondream 2 and the basketball detection dataset, and
 supports LoRA-only fine-tuning via the same adapters as `sft_trainer.py`.
+
+Usage Examples:
+---------------
+Basic training with default hyperparameters:
+    python sft_trainer_detect_grad.py
+
+Training with custom learning rate and epochs:
+    python sft_trainer_detect_grad.py --lr=1e-5 --epochs=5
+
+Training with LoRA enabled:
+    python sft_trainer_detect_grad.py --use_lora=True --lora_rank=32
+
+Training with custom gradient accumulation:
+    python sft_trainer_detect_grad.py --grad_accum_steps=16 --eval_interval=10
+
+Training with overfitting mode:
+    python sft_trainer_detect_grad.py --overfit_batch_size=8 --epochs=10
 """
 
-import math
 import logging
 import os
 from typing import Optional
@@ -21,15 +37,21 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
+from torch.utils.data import Dataset
 from tqdm import tqdm
 from safetensors.torch import load_file, save_file
 import wandb
+import fire
 
-from sft_trainer import (
+from datasets.basketball_dataset import BasketballCocoDataset
+from trainer_helpers import (
     LoRALinear,
     inject_lora_into_model,
     get_lora_state_dict,
-    BasketballDetection,
+    lr_schedule,
+    coord_to_bin,
+    size_to_bin,
+    bin_to_size,
     validate,
     validate_with_gt,
 )
@@ -44,54 +66,60 @@ from moondream2.region import (
 )
 
 
-# Hyperparameters (tuned for stability; feel free to adjust)
-LR = 1e-5
-EPOCHS = 50
-GRAD_ACCUM_STEPS = 1
-VALIDATION_SAMPLES = 250
-EVAL_INTERVAL = 1
-OVERFIT_BATCH_SIZE: Optional[int] = 1  # Set >0 to overfit on a tiny subset
+class BasketballDetection(Dataset):
+    def __init__(self, split: str = "train"):
+        """Wrapper for basketball dataset to match SFT trainer format"""
+        dataset_root = "datasets/basketball-player-detection-3.v1i.coco"
 
-# LoRA configuration
-USE_LORA = True
-LORA_RANK = 32
-LORA_ALPHA = 64
-LORA_DROPOUT = 0.1
-LORA_TARGET_MODULES = ["qkv", "proj", "fc1", "fc2"]
+        if split == "train":
+            self.dataset = BasketballCocoDataset(
+                dataset_root, split="train", categories_to_use=["player"]
+            )
+        elif split == "val":
+            self.dataset = BasketballCocoDataset(
+                dataset_root, split="valid", categories_to_use=["player"]
+            )
+        else:
+            self.dataset = BasketballCocoDataset(
+                dataset_root, split="test", categories_to_use=["player"]
+            )
 
-MODEL_PATH = "moondream2/model.safetensors"
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        image, label, boxes = self.dataset[idx]
+
+        # Convert from normalized [x_min, y_min, x_max, y_max] format
+        # to [x, y, w, h] format expected by SFT trainer
+        flat_boxes = []
+        class_names = []
+        for box in boxes:
+            x = box["x_min"]
+            y = box["y_min"]
+            w = box["x_max"] - box["x_min"]
+            h = box["y_max"] - box["y_min"]
+            flat_boxes.append([x, y, w, h])
+            class_names.append(label)
+
+        # Use float32 for better numerical stability and compatibility
+        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
+        image_id = torch.tensor([idx], dtype=torch.int64)
+
+        return {
+            "image": image,
+            "boxes": flat_boxes,
+            "class_names": class_names,
+            "image_id": image_id,
+        }
+
+    def get_sample_for_validation(self, idx):
+        """Get sample in format compatible with validation functions"""
+        # Just use the underlying dataset's format which is already correct
+        return self.dataset[idx]
+
 
 device = "cuda" if torch.cuda.is_available() else "mps"
-
-
-def lr_schedule(step: int, max_steps: int) -> float:
-    x = step / max_steps
-    if x < 0.1:
-        return 0.1 * LR + 0.9 * LR * x / 0.1
-    else:
-        return 0.1 * LR + 0.9 * LR * (1 + math.cos(math.pi * (x - 0.1))) / 2
-
-
-def coord_to_bin(center: float, n_bins: int = 1024) -> int:
-    """Map normalized coord in [0,1] to discrete bin [0, n_bins-1]."""
-    return int(min(max(round(center * (n_bins - 1)), 0), n_bins - 1))
-
-
-def size_to_bin(s: float, n_bins: int = 1024) -> int:
-    """
-    Map normalized size to log-scale bin as in the region head:
-    bin = (log2(size) + 10.0) / 10.0 * 1023.0, clamped to [0, 1023].
-    """
-    s_clamped = max(float(s), 1.0 / 1024.0)
-    s_log2 = math.log2(s_clamped)
-    mapped = (s_log2 + 10.0) / 10.0 * (n_bins - 1)
-    b = int(round(mapped))
-    return int(min(max(b, 0), n_bins - 1))
-
-
-def bin_to_size(bin_idx: int, n_bins: int = 1024) -> float:
-    """Inverse mapping from bin index back to size value."""
-    return float(2.0 ** ((bin_idx / (n_bins - 1.0)) * 10.0 - 10.0))
 
 
 def teacher_forced_region_loss(
@@ -247,7 +275,45 @@ def teacher_forced_region_loss(
     return total_loss / n_terms
 
 
-def main():
+def main(
+    lr: float = 5e-6,
+    epochs: int = 3,
+    grad_accum_steps: int = 32,
+    validation_samples: int = 250,
+    eval_interval: int = 5,
+    overfit_batch_size: Optional[int] = None,
+    use_lora: bool = False,
+    lora_rank: int = 32,
+    lora_alpha: int = 64,
+    lora_dropout: float = 0.1,
+    lora_target_modules: list = None,
+    model_path: str = "moondream2/model.safetensors",
+    wandb_project: str = "moondream-basketball-ft-detect-grad",
+    dataset_name: str = "basketball-player-detection",
+):
+    """
+    Main training function with configurable hyperparameters via Fire CLI.
+
+    Args:
+        lr: Learning rate (default: 5e-6)
+        epochs: Number of training epochs (default: 3)
+        grad_accum_steps: Gradient accumulation steps (default: 32)
+        validation_samples: Number of samples to use for validation (default: 250)
+        eval_interval: Evaluate every N gradient accumulation steps (default: 5)
+        overfit_batch_size: Set to > 0 to overfit on a tiny subset (default: None)
+        use_lora: Whether to use LoRA instead of full fine-tuning (default: False)
+        lora_rank: Rank of LoRA matrices (default: 32)
+        lora_alpha: Scaling factor for LoRA, typically 2x rank (default: 64)
+        lora_dropout: Dropout for LoRA layers (default: 0.1)
+        lora_target_modules: Which layers to apply LoRA to (default: ["qkv", "proj", "fc1", "fc2"])
+        model_path: Path to model safetensors file (default: "moondream2/model.safetensors")
+        wandb_project: Weights & Biases project name (default: "moondream-basketball-ft-detect-grad")
+        dataset_name: Dataset name for wandb logging (default: "basketball-player-detection")
+    """
+    # Set default lora_target_modules if None
+    if lora_target_modules is None:
+        lora_target_modules = ["qkv", "proj", "fc1", "fc2"]
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -255,19 +321,19 @@ def main():
     os.makedirs("predictions", exist_ok=True)
 
     wandb.init(
-        project="moondream-basketball-ft-detect-grad",
+        project=wandb_project,
         config={
-            "EPOCHS": EPOCHS,
-            "GRAD_ACCUM_STEPS": GRAD_ACCUM_STEPS,
-            "LR": LR,
-            "VALIDATION_SAMPLES": VALIDATION_SAMPLES,
-            "EVAL_INTERVAL": EVAL_INTERVAL,
-            "OVERFIT_BATCH_SIZE": OVERFIT_BATCH_SIZE,
-            "USE_LORA": USE_LORA,
-            "LORA_RANK": LORA_RANK if USE_LORA else None,
-            "LORA_ALPHA": LORA_ALPHA if USE_LORA else None,
-            "LORA_DROPOUT": LORA_DROPOUT if USE_LORA else None,
-            "dataset": "basketball-player-detection",
+            "EPOCHS": epochs,
+            "GRAD_ACCUM_STEPS": grad_accum_steps,
+            "LR": lr,
+            "VALIDATION_SAMPLES": validation_samples,
+            "EVAL_INTERVAL": eval_interval,
+            "OVERFIT_BATCH_SIZE": overfit_batch_size,
+            "USE_LORA": use_lora,
+            "LORA_RANK": lora_rank if use_lora else None,
+            "LORA_ALPHA": lora_alpha if use_lora else None,
+            "LORA_DROPOUT": lora_dropout if use_lora else None,
+            "dataset": dataset_name,
             "md_version": "2",
             "trainer": "detect_grad_teacher_forced",
         },
@@ -275,7 +341,7 @@ def main():
 
     # Build and load Moondream 2
     model = MoondreamModel(config=MoondreamConfig(), setup_caches=True)
-    state_dict = load_file(MODEL_PATH)
+    state_dict = load_file(model_path)
     model.load_state_dict(state_dict)
     model.to(device)
 
@@ -284,14 +350,14 @@ def main():
         buffer.data = buffer.data.to(device)
 
     # Apply LoRA if enabled
-    if USE_LORA:
+    if use_lora:
         logging.info("Applying LoRA adapters to text model...")
         inject_lora_into_model(
             model,
-            rank=LORA_RANK,
-            alpha=LORA_ALPHA,
-            dropout=LORA_DROPOUT,
-            target_modules=LORA_TARGET_MODULES,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            target_modules=lora_target_modules,
         )
 
         # Freeze all base parameters, then unfreeze only LoRA weights
@@ -310,39 +376,39 @@ def main():
 
         optimizer = AdamW(
             [{"params": [p for p in model.parameters() if p.requires_grad]}],
-            lr=LR,
+            lr=lr,
         )
     else:
         total_params = sum(p.numel() for p in model.parameters())
         logging.info(f"Total trainable parameters (full fine-tuning): {total_params:,}")
-        optimizer = AdamW(model.parameters(), lr=LR)
+        optimizer = AdamW(model.parameters(), lr=lr)
 
     # Datasets (basketball player detection)
     dataset = BasketballDetection(split="train")
     val_dataset = BasketballDetection(split="val")
 
     # Overfit subset handling
-    if OVERFIT_BATCH_SIZE is not None and OVERFIT_BATCH_SIZE > 0:
+    if overfit_batch_size is not None and overfit_batch_size > 0:
         logging.info(
-            f"Overfitting mode: using first {OVERFIT_BATCH_SIZE} training samples for both train and val"
+            f"Overfitting mode: using first {overfit_batch_size} training samples for both train and val"
         )
         train_full = BasketballDetection(split="train")
-        train_full.dataset.image_ids = train_full.dataset.image_ids[:OVERFIT_BATCH_SIZE]
+        train_full.dataset.image_ids = train_full.dataset.image_ids[:overfit_batch_size]
         dataset = train_full
 
         val_full = BasketballDetection(split="train")
-        val_full.dataset.image_ids = val_full.dataset.image_ids[:OVERFIT_BATCH_SIZE]
+        val_full.dataset.image_ids = val_full.dataset.image_ids[:overfit_batch_size]
         val_dataset = val_full
 
     logging.info(f"Train dataset size: {len(dataset)}")
     logging.info(f"Val dataset size: {len(val_dataset)}")
 
     # Initial validation
-    gt_validation_score = validate_with_gt(val_dataset, max_samples=VALIDATION_SAMPLES)
+    gt_validation_score = validate_with_gt(val_dataset, max_samples=validation_samples)
     logging.info(f"GT validation f1: {round(gt_validation_score['f1'], 4)}")
 
     initial_validation_score = validate(
-        model, val_dataset, step=0, max_samples=VALIDATION_SAMPLES
+        model, val_dataset, step=0, max_samples=validation_samples
     )
     best_validation_score = initial_validation_score["f1"]
     logging.info(f"Initial validation f1: {round(initial_validation_score['f1'], 4)}")
@@ -359,12 +425,12 @@ def main():
         step=0,
     )
 
-    total_steps = EPOCHS * len(dataset) // GRAD_ACCUM_STEPS
+    total_steps = epochs * len(dataset) // grad_accum_steps
     pbar = tqdm(total=total_steps)
 
     model.train()
     i = 0
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         for sample in dataset:
             i += 1
 
@@ -391,15 +457,15 @@ def main():
             if total_loss is not None:
                 (total_loss / max(len(boxes_by_class), 1)).backward()
 
-            if i % GRAD_ACCUM_STEPS == 0:
+            if i % grad_accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
-                lr_val = lr_schedule(i // GRAD_ACCUM_STEPS, total_steps)
+                lr_val = lr_schedule(i // grad_accum_steps, total_steps, base_lr=lr)
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = lr_val
 
-                current_step = i // GRAD_ACCUM_STEPS
+                current_step = i // grad_accum_steps
                 loss_val = (
                     total_loss.item() / max(len(boxes_by_class), 1)
                     if total_loss is not None
@@ -418,13 +484,13 @@ def main():
                 )
 
                 # Periodic validation
-                if current_step % EVAL_INTERVAL == 0 and current_step > 0:
+                if current_step % eval_interval == 0 and current_step > 0:
                     logging.info(f"Evaluating at step {current_step}")
                     validation_score = validate(
                         model,
                         val_dataset,
                         step=current_step,
-                        max_samples=VALIDATION_SAMPLES,
+                        max_samples=validation_samples,
                     )
                     logging.info(f"Validation f1: {round(validation_score['f1'], 4)}")
 
@@ -440,7 +506,7 @@ def main():
                     # Save best model (LoRA-only if enabled)
                     if validation_score["f1"] > best_validation_score:
                         best_validation_score = validation_score["f1"]
-                        if USE_LORA:
+                        if use_lora:
                             save_file(
                                 get_lora_state_dict(model),
                                 f"moondream_lora_best_step_{current_step}_detect_grad.safetensors",
@@ -460,7 +526,7 @@ def main():
     wandb.finish()
 
     # Final checkpoint
-    if USE_LORA:
+    if use_lora:
         save_file(
             get_lora_state_dict(model),
             "moondream_lora_finetune_detect_grad.safetensors",
@@ -477,4 +543,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    """
+    Run with Fire CLI. Examples:
+        python sft_trainer_detect_grad.py
+        python sft_trainer_detect_grad.py --lr=1e-5 --epochs=5
+        python sft_trainer_detect_grad.py --use_lora=True
+    """
+    fire.Fire(main)

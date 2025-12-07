@@ -6,7 +6,7 @@ These trainers are focused on improving the model's ability to detect and locali
 
 ### Warning:
 
-This code works best for Moondream 2, and the teacher forced trainer (`sft_trainer_detect_grad.py`).
+This code works best for Moondream 2, and the teacher forced trainer (`sft_trainer.py`).
 
 ## Setup
 
@@ -37,7 +37,7 @@ Place that (or any other COCO style dataset) in the `datasets/{dataset_name}/` d
 
 ### 1. SFT Trainer (`sft_trainer.py`)
 
-Supervised fine-tuning with teacher-forced supervision on the region head using synthetic sequences and optional LoRA adapters.
+Teacher-forced region fine-tuning that follows the generative detection path exactly as used during inference for more aligned training. Supports optional LoRA adapters.
 
 **Run with default settings:**
 
@@ -48,26 +48,10 @@ python sft_trainer.py
 **Run with custom parameters:**
 
 ```bash
-python sft_trainer.py --lr=1e-3 --epochs=20 --use_lora=True --lora_rank=32
+python sft_trainer.py --lr=1e-5 --epochs=5 --use_lora=True --grad_accum_steps=16
 ```
 
-### 2. SFT Detect Grad Trainer (`sft_trainer_detect_grad.py`)
-
-Teacher-forced region fine-tuning that follows the generative detection path exactly as used during inference for more aligned training.
-
-**Run with default settings:**
-
-```bash
-python sft_trainer_detect_grad.py
-```
-
-**Run with custom parameters:**
-
-```bash
-python sft_trainer_detect_grad.py --lr=1e-5 --epochs=5 --use_lora=True --grad_accum_steps=16
-```
-
-### 3. GRPO Trainer (`grpo_trainer.py`)
+### 2. GRPO Trainer (`grpo_trainer.py`)
 
 Group Relative Policy Optimization (GRPO) trainer that uses reinforcement learning to fine-tune the region head by collecting rollouts and computing rewards based on detection quality.
 
@@ -83,14 +67,14 @@ python grpo_trainer.py
 python grpo_trainer.py --learning_rate=5e-5 --batch_size=5 --num_rollouts=5 --num_epochs=3
 ```
 
-## Loading LoRA adapters trained with `sft_trainer_detect_grad.py`
+## Loading LoRA adapters trained with `sft_trainer.py`
 
-The teacher-forced SFT trainer in `sft_trainer_detect_grad.py` can fine-tune Moondream-2 using LoRA adapters implemented in `trainer_helpers.py` (via the `LoRALinear` wrapper), **not** the built-in `moondream2/lora.py` / `variant_state_dict` mechanism.
+The SFT trainer in `sft_trainer.py` can fine-tune Moondream-2 using LoRA adapters implemented in `trainer_helpers.py` (via the `LoRALinear` wrapper), **not** the built-in `moondream2/lora.py` / `variant_state_dict` mechanism.
 
-When you run `sft_trainer_detect_grad.py` with `USE_LORA = True`, it will save LoRA-only checkpoints such as:
+When you run `sft_trainer.py` with `use_lora=True`, it will save LoRA-only checkpoints such as:
 
--   **Best checkpoint**: `moondream_lora_best_step_{STEP}_detect_grad.safetensors`
--   **Final checkpoint**: `moondream_lora_finetune_detect_grad.safetensors`
+-   **Best checkpoint**: `moondream_lora_best_step_{STEP}.safetensors`
+-   **Final checkpoint**: `moondream_lora_finetune.safetensors`
 
 To load these adapters for inference:
 
@@ -133,8 +117,8 @@ inject_lora_into_model(
 ```python
 from safetensors.torch import load_file
 
-# For example, load the final detect_grad LoRA checkpoint
-lora_state = load_file("moondream_lora_finetune_detect_grad.safetensors")
+# For example, load the final LoRA checkpoint
+lora_state = load_file("moondream_lora_finetune.safetensors")
 
 # This will populate only the LoRA parameters (e.g. *.lora_A, *.lora_B)
 missing, unexpected = model.load_state_dict(lora_state, strict=False)

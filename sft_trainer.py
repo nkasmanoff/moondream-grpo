@@ -1,23 +1,16 @@
 """
-Graciously adapted from https://github.com/moondream-ai/moondream/blob/main/finetune_region.py
+Teacher-forced region fine-tuning that follows the generative detection path.
 
-LoRA Fine-Tuning:
------------------
-This trainer supports both full fine-tuning and LoRA (Low-Rank Adaptation) fine-tuning.
+Instead of supervising the region head on hidden states from a synthetic sequence
+(`_produce_hidden`), this trainer:
+- Uses `encode_image_grad` + `_prefill_prompt_grad` to set up caches exactly
+  like `detect` / `detect_grad`.
+- Steps the decoder with teacher-forced ground-truth centers and sizes,
+  and applies cross-entropy on the coordinate / size logits at the same
+  points where inference uses them.
 
-LoRA Benefits:
-- Much fewer trainable parameters (~1-2% of full model)
-- Faster training and lower memory usage
-- Smaller checkpoint files (only LoRA weights saved)
-- Can be merged with base model or swapped at inference time
-
-To enable LoRA, set USE_LORA = True and configure:
-- LORA_RANK: Rank of LoRA matrices (8-64, default 16)
-- LORA_ALPHA: Scaling factor (typically 2x rank, default 32)
-- LORA_DROPOUT: Dropout probability (default 0.1)
-- LORA_TARGET_MODULES: Which layers to apply LoRA to
-
-LoRA adapters are saved separately as "moondream_lora_*.safetensors"
+This is designed for Moondream 2 and the basketball detection dataset, and
+supports LoRA-only fine-tuning.
 
 Usage Examples:
 ---------------
@@ -25,310 +18,251 @@ Basic training with default hyperparameters:
     python sft_trainer.py
 
 Training with custom learning rate and epochs:
-    python sft_trainer.py --lr=1e-3 --epochs=20
+    python sft_trainer.py --lr=1e-5 --epochs=5
 
-Training with LoRA disabled (full fine-tuning):
-    python sft_trainer.py --use_lora=False
+Training with LoRA enabled:
+    python sft_trainer.py --use_lora=True --lora_rank=32
 
-Training with custom LoRA parameters:
-    python sft_trainer.py --lora_rank=32 --lora_alpha=64 --lora_dropout=0.2
+Training with custom gradient accumulation:
+    python sft_trainer.py --grad_accum_steps=16 --eval_interval=10
 
-Training with overfitting mode (small batch):
-    python sft_trainer.py --overfit_batch_size=8 --epochs=5
-
-Training with Moondream 3:
-    python sft_trainer.py --md_version=3
-
-Combining multiple parameters:
-    python sft_trainer.py --lr=1e-3 --epochs=15 --grad_accum_steps=2 --eval_interval=100 --validation_samples=500
+Training with overfitting mode:
+    python sft_trainer.py --overfit_batch_size=8 --epochs=10
 """
 
-import torch
-from torch.utils.data import Dataset
-from safetensors.torch import save_file
-import datasets
 import logging
 import os
-import math
+from typing import Optional
 
-from tqdm import tqdm
+import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
+from torch.utils.data import Dataset
+from tqdm import tqdm
+from safetensors.torch import load_file, save_file
 import wandb
-from safetensors.torch import load_file
 import fire
 
-# Import basketball dataset
-from datasets.basketball_dataset import BasketballCocoDataset
-
-# Import shared helper functions
+from datasets.basketball_dataset import BasketballDetection
 from trainer_helpers import (
     LoRALinear,
     inject_lora_into_model,
     get_lora_state_dict,
     lr_schedule,
-    region_loss,
+    coord_to_bin,
+    size_to_bin,
+    bin_to_size,
     validate,
     validate_with_gt,
 )
 
+from moondream2.moondream import MoondreamModel, MoondreamConfig
+from moondream2.moondream_functions import encode_image_grad, _prefill_prompt_grad
+from moondream2.region import (
+    decode_coordinate,
+    decode_size,
+    encode_coordinate,
+    encode_size,
+)
 
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 
-class WasteDetection(Dataset):
-    def __init__(self, split: str = "train"):
-        self.dataset: datasets.Dataset = datasets.load_dataset(
-            "moondream/waste_detection", split=split
+def teacher_forced_region_loss(
+    model: MoondreamModel,
+    image,
+    class_name: str,
+    boxes: torch.Tensor,
+    max_objects: Optional[int] = None,
+) -> torch.Tensor:
+    """
+    Compute region loss by following the same decode path as `detect` but with
+    teacher-forced ground-truth centers and sizes.
+
+    Args:
+        model: MoondreamModel (Moondream 2).
+        image: PIL.Image for the sample.
+        class_name: Object string used for the detect prompt.
+        boxes: Tensor of shape (N, 4) with [x_min, y_min, w, h] in [0, 1].
+        max_objects: Optional cap on number of GT boxes to supervise.
+    """
+    if boxes.numel() == 0:
+        return torch.zeros([], device=model.device)
+
+    # Use the same detect template as inference
+    detect_template = model.config.tokenizer.templates["detect"]
+    object_tokens = model.tokenizer.encode(" " + class_name).ids
+    instruction_token_ids = (
+        detect_template["prefix"] + object_tokens + detect_template["suffix"]
+    )
+
+    # Encode image and prefill caches with BOS + image
+    with torch.no_grad():
+        encoded_image = encode_image_grad(model, image, settings=None)
+    model.load_encoded_image(encoded_image)
+    pos = encoded_image.pos
+
+    # Prefill detect prompt (no teacher forcing yet)
+    prompt_tokens = torch.tensor(
+        [instruction_token_ids],
+        dtype=torch.long,
+        device=model.device,
+    )
+    logits_BV, hidden_BC, next_token, pos = _prefill_prompt_grad(
+        model,
+        prompt_tokens,
+        pos,
+        temperature=0.0,
+        top_p=0.0,
+        spatial_refs=None,
+        attn_mask=None,
+        lora=None,
+    )
+    # Hidden state corresponding to the last prompt token
+    hidden = hidden_BC[:, -1:, :]
+
+    # Attention mask used for subsequent one-token decode steps
+    mask = torch.zeros(1, 1, 2048, device=model.device, dtype=torch.bool)
+    mask[:, :, :pos] = 1
+
+    if max_objects is None:
+        max_objects = boxes.size(0)
+    n_objects = min(boxes.size(0), max_objects)
+
+    total_loss = torch.zeros([], device=model.device)
+    n_terms = 0
+
+    for obj_idx in range(n_objects):
+        bb = boxes[obj_idx].to(model.device)  # [x_min, y_min, w, h]
+        x_min, y_min, w_box, h_box = bb
+
+        # Convert to center coordinates
+        x_center = torch.clamp(x_min + w_box / 2.0, 0.0, 1.0)
+        y_center = torch.clamp(y_min + h_box / 2.0, 0.0, 1.0)
+
+        # ----- X coordinate step -----
+        x_logits = decode_coordinate(hidden, model.region)  # [1, 1, 1024]
+        x_bin = coord_to_bin(float(x_center))
+        x_target = torch.tensor([x_bin], dtype=torch.long, device=model.device)
+        loss_x = F.cross_entropy(
+            x_logits.view(-1, x_logits.size(-1)),
+            x_target,
         )
-        self.dataset = self.dataset.shuffle(seed=111)
+        total_loss = total_loss + loss_x
+        n_terms += 1
 
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        row = self.dataset[idx]
-        image = row["image"]
-        boxes = row["boxes"]
-        labels = row["labels"]
-
-        objects = {}
-        for box, label in zip(boxes, labels):
-            objects.setdefault(label, []).append(box)
-
-        flat_boxes = []
-        class_names = []
-        for label, box_list in objects.items():
-            for b in box_list:
-                flat_boxes.append(b)  # x, y, w, h , normalized to 0-1
-                class_names.append(label)
-
-        # Use float32 for better numerical stability and compatibility
-        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
-        image_id = torch.tensor([idx], dtype=torch.int64)
-
-        return {
-            "image": image,
-            "boxes": flat_boxes,
-            "class_names": class_names,
-            "image_id": image_id,
-        }
-
-    def get_sample_for_validation(self, idx):
-        """Get sample in format compatible with validation functions"""
-        row = self.dataset[idx]
-        image = row["image"]
-        boxes = row["boxes"]
-        labels = row["labels"]
-
-        # Convert to normalized boxes format expected by validation
-        normalized_boxes = []
-        for box in boxes:
-            # box is already [x, y, w, h] normalized to 0-1
-            x, y, w, h = box
-            normalized_boxes.append(
-                {
-                    "x_min": x,
-                    "y_min": y,
-                    "x_max": x + w,
-                    "y_max": y + h,
-                }
-            )
-
-        # Use first label as the query
-        label = labels[0] if labels else "object"
-
-        return image, label, normalized_boxes
-
-
-class BasketballDetection(Dataset):
-    def __init__(self, split: str = "train"):
-        """Wrapper for basketball dataset to match SFT trainer format"""
-        dataset_root = "datasets/basketball-player-detection-3.v1i.coco"
-
-        if split == "train":
-            self.dataset = BasketballCocoDataset(
-                dataset_root, split="train", categories_to_use=["player"]
-            )
-        elif split == "val":
-            self.dataset = BasketballCocoDataset(
-                dataset_root, split="valid", categories_to_use=["player"]
-            )
-        else:
-            self.dataset = BasketballCocoDataset(
-                dataset_root, split="test", categories_to_use=["player"]
-            )
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        image, label, boxes = self.dataset[idx]
-
-        # Convert from normalized [x_min, y_min, x_max, y_max] format
-        # to [x, y, w, h] format expected by SFT trainer
-        flat_boxes = []
-        class_names = []
-        for box in boxes:
-            x = box["x_min"]
-            y = box["y_min"]
-            w = box["x_max"] - box["x_min"]
-            h = box["y_max"] - box["y_min"]
-            flat_boxes.append([x, y, w, h])
-            class_names.append(label)
-
-        # Use float32 for better numerical stability and compatibility
-        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
-        image_id = torch.tensor([idx], dtype=torch.int64)
-
-        return {
-            "image": image,
-            "boxes": flat_boxes,
-            "class_names": class_names,
-            "image_id": image_id,
-        }
-
-    def get_sample_for_validation(self, idx):
-        """Get sample in format compatible with validation functions"""
-        # Just use the underlying dataset's format which is already correct
-        return self.dataset[idx]
-
-
-class RefCocoDetection(Dataset):
-    def __init__(self, split: str = "train"):
-        self.dataset: datasets.Dataset = datasets.load_dataset(
-            "lmms-lab/RefCOCO", split="val" if split == "train" else "test"
+        # Teacher-force x embedding and advance decoder (y will see this)
+        # Shape here should match Moondream's own `_generate_points_grad`:
+        # x_center.unsqueeze(-1) -> (1, 1, 1), then encode_coordinate -> (1, 1, dim)
+        x_center_tensor = (
+            x_center.unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(-1)
+            .to(dtype=x_logits.dtype, device=model.device)
         )
-        self.dataset = self.dataset.shuffle(seed=111)
+        next_emb = encode_coordinate(x_center_tensor, model.region)
+        mask[:, :, pos] = 1
+        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids, lora=None)
+        pos += 1
 
-    def __len__(self):
-        return len(self.dataset)
+        # ----- Y coordinate step -----
+        y_logits = decode_coordinate(hidden, model.region)
+        y_bin = coord_to_bin(float(y_center))
+        y_target = torch.tensor([y_bin], dtype=torch.long, device=model.device)
+        loss_y = F.cross_entropy(
+            y_logits.view(-1, y_logits.size(-1)),
+            y_target,
+        )
+        total_loss = total_loss + loss_y
+        n_terms += 1
 
-    def __getitem__(self, idx):
-        row = self.dataset[idx]
-        image = row["image"]
-        labels = row["answer"]
-        boxes = [row["bbox"]]
+        # Teacher-force y embedding and advance decoder (size will see this)
+        y_center_tensor = (
+            y_center.unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(-1)
+            .to(dtype=y_logits.dtype, device=model.device)
+        )
+        next_emb = encode_coordinate(y_center_tensor, model.region)
+        mask[:, :, pos] = 1
+        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids, lora=None)
+        pos += 1
 
-        flat_boxes = []
-        class_names = []
-        for label, box in zip(labels, boxes):
-            x, y, w, h = box
-            x = x / image.width
-            y = y / image.height
-            w = w / image.width
-            h = h / image.height
-            flat_boxes.append([x, y, w, h])
-            class_names.append(label)
+        # ----- Size step (log-scale bins for w, h) -----
+        size_logits = decode_size(hidden, model.region)  # (2, 1024)
+        w_bin = size_to_bin(float(w_box))
+        h_bin = size_to_bin(float(h_box))
+        w_target = torch.tensor([w_bin], dtype=torch.long, device=model.device)
+        h_target = torch.tensor([h_bin], dtype=torch.long, device=model.device)
 
-        # Use float32 for better numerical stability and compatibility
-        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
-        image_id = torch.tensor([idx], dtype=torch.int64)
+        loss_w = F.cross_entropy(size_logits[0].unsqueeze(0), w_target)
+        loss_h = F.cross_entropy(size_logits[1].unsqueeze(0), h_target)
+        total_loss = total_loss + loss_w + loss_h
+        n_terms += 2
 
-        return {
-            "image": image,
-            "boxes": flat_boxes,
-            "class_names": class_names,
-            "image_id": image_id,
-        }
+        # Teacher-force size embedding and take one LM step to start next object
+        w_val = bin_to_size(w_bin)
+        h_val = bin_to_size(h_bin)
+        size_tensor = torch.tensor(
+            [w_val, h_val],
+            device=model.device,
+            dtype=size_logits.dtype,
+        )
+        next_emb = encode_size(size_tensor, model.region).unsqueeze(0).unsqueeze(0)
+        mask[:, :, pos] = 1
+        pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
+        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids, lora=None)
+        pos += 1
 
-    def get_sample_for_validation(self, idx):
-        """Get sample in format compatible with validation functions"""
-        row = self.dataset[idx]
-        image = row["image"]
-        labels = row["answer"]
-        boxes = [row["bbox"]]
-
-        # Convert to normalized boxes format expected by validation
-        normalized_boxes = []
-        for box in boxes:
-            x, y, w, h = box
-            x = x / image.width
-            y = y / image.height
-            w = w / image.width
-            h = h / image.height
-            normalized_boxes.append(
-                {
-                    "x_min": x,
-                    "y_min": y,
-                    "x_max": x + w,
-                    "y_max": y + h,
-                }
-            )
-
-        # Use first label as the query
-        label = labels[0] if labels else "object"
-
-        return image, label, normalized_boxes
+    if n_terms == 0:
+        return torch.zeros([], device=model.device)
+    return total_loss / n_terms
 
 
 def main(
-    lr: float = 5e-4,
-    epochs: int = 10,
-    grad_accum_steps: int = 1,
+    lr: float = 5e-6,
+    epochs: int = 3,
+    grad_accum_steps: int = 32,
     validation_samples: int = 250,
-    max_plot_samples: int = 25,
-    eval_interval: int = 50,
-    overfit_batch_size: int = 4,
-    use_lora: bool = True,
-    lora_rank: int = 16,
-    lora_alpha: int = 32,
+    eval_interval: int = 5,
+    overfit_batch_size: Optional[int] = None,
+    use_lora: bool = False,
+    lora_rank: int = 32,
+    lora_alpha: int = 64,
     lora_dropout: float = 0.1,
     lora_target_modules: list = None,
-    md_version: str = "2",
+    model_path: str = "moondream2/model.safetensors",
     wandb_project: str = "moondream-basketball-ft",
-    dataset_name: str = "basketball-ball-detection",
+    dataset_name: str = "basketball-player-detection",
 ):
     """
     Main training function with configurable hyperparameters via Fire CLI.
 
     Args:
-        lr: Learning rate (default: 5e-4)
-        epochs: Number of training epochs (default: 10)
-        grad_accum_steps: Gradient accumulation steps (default: 1)
+        lr: Learning rate (default: 5e-6)
+        epochs: Number of training epochs (default: 3)
+        grad_accum_steps: Gradient accumulation steps (default: 32)
         validation_samples: Number of samples to use for validation (default: 250)
-        max_plot_samples: Maximum number of samples to plot during validation (default: 25)
-        eval_interval: Evaluate every N gradient accumulation steps (default: 50)
-        overfit_batch_size: Set to > 0 to overfit on a small batch (default: 4)
-        use_lora: Whether to use LoRA instead of full fine-tuning (default: True)
-        lora_rank: Rank of LoRA matrices (default: 16)
-        lora_alpha: Scaling factor for LoRA, typically 2x rank (default: 32)
+        eval_interval: Evaluate every N gradient accumulation steps (default: 5)
+        overfit_batch_size: Set to > 0 to overfit on a tiny subset (default: None)
+        use_lora: Whether to use LoRA instead of full fine-tuning (default: False)
+        lora_rank: Rank of LoRA matrices (default: 32)
+        lora_alpha: Scaling factor for LoRA, typically 2x rank (default: 64)
         lora_dropout: Dropout for LoRA layers (default: 0.1)
         lora_target_modules: Which layers to apply LoRA to (default: ["qkv", "proj", "fc1", "fc2"])
-        md_version: Moondream version ("2" or "3") (default: "2")
+        model_path: Path to model safetensors file (default: "moondream2/model.safetensors")
         wandb_project: Weights & Biases project name (default: "moondream-basketball-ft")
-        dataset_name: Dataset name for wandb logging (default: "basketball-ball-detection")
+        dataset_name: Dataset name for wandb logging (default: "basketball-player-detection")
     """
     # Set default lora_target_modules if None
     if lora_target_modules is None:
         lora_target_modules = ["qkv", "proj", "fc1", "fc2"]
 
-    # Import appropriate moondream version
-    if md_version == "3":
-        from moondream3.moondream import MoondreamModel, MoondreamConfig
-        from moondream3.moondream_functions import detect
-        from moondream3.moondream import text_encoder
-        from moondream3.text import _produce_hidden
-        from moondream3.region import (
-            encode_coordinate,
-            encode_size,
-        )
-
-        model_path = "models/model_md3.safetensors"
-    elif md_version == "2":
-        from moondream2.moondream import MoondreamModel, MoondreamConfig, text_encoder
-        from moondream2.moondream_functions import detect
-        from moondream2.text import _produce_hidden
-        from moondream2.region import (
-            encode_coordinate,
-            encode_size,
-        )
-
-        model_path = "moondream2/model.safetensors"
-    else:
-        raise ValueError(f"Invalid md_version: {md_version}. Must be '2' or '3'")
-
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
     )
     os.makedirs("predictions", exist_ok=True)
 
@@ -346,64 +280,25 @@ def main(
             "LORA_ALPHA": lora_alpha if use_lora else None,
             "LORA_DROPOUT": lora_dropout if use_lora else None,
             "dataset": dataset_name,
-            "md_version": md_version,
+            "md_version": "2",
+            "trainer": "teacher_forced",
         },
     )
 
-    # Setup model with appropriate cache settings based on version
-    if md_version == "3":
-        setup_caches = False
-    else:
-        setup_caches = True
-
-    model = MoondreamModel(config=MoondreamConfig(), setup_caches=setup_caches)
-
-    # Load weights before moving to device
+    # Build and load Moondream 2
+    model = MoondreamModel(config=MoondreamConfig(), setup_caches=True)
     state_dict = load_file(model_path)
     model.load_state_dict(state_dict)
-
-    # Move model to device
     model.to(device)
 
-    # For MD3, setup caches after loading weights
-    if md_version == "3":
-        model._setup_caches()
-
-    # Ensure all buffers and parameters are on the correct device
-    for name, buffer in model.named_buffers():
+    # Ensure all buffers are on the right device
+    for _, buffer in model.named_buffers():
         buffer.data = buffer.data.to(device)
-
-    # Also explicitly move submodules
-    model.text.to(device)
-    model.vision.to(device)
-    model.region.to(device)
-
-    # Force all parameters to device
-    for param in model.parameters():
-        param.data = param.data.to(device)
-        if param._grad is not None:
-            param._grad.data = param._grad.data.to(device)
-
-    # Verify all tensors are on the correct device
-    device_str = str(device)
-    for name, param in model.named_parameters():
-        if str(param.device) != device_str:
-            logging.warning(
-                f"Parameter {name} is on {param.device}, moving to {device}"
-            )
-            param.data = param.data.to(device)
-
-    for name, buffer in model.named_buffers():
-        if str(buffer.device) != device_str:
-            logging.warning(f"Buffer {name} is on {buffer.device}, moving to {device}")
-            buffer.data = buffer.data.to(device)
-
-    logging.info(f"Model successfully loaded and moved to {device}")
 
     # Apply LoRA if enabled
     if use_lora:
-        logging.info("Applying LoRA to model...")
-        lora_params = inject_lora_into_model(
+        logging.info("Applying LoRA adapters to text model...")
+        inject_lora_into_model(
             model,
             rank=lora_rank,
             alpha=lora_alpha,
@@ -411,72 +306,70 @@ def main(
             target_modules=lora_target_modules,
         )
 
-        # Freeze all parameters, then unfreeze only LoRA weights.
-        # This ensures we're really doing LoRA-style fine-tuning, not (almost) full fine-tuning.
+        # Freeze all base parameters, then unfreeze only LoRA weights
         for param in model.parameters():
             param.requires_grad = False
-
         for module in model.modules():
             if isinstance(module, LoRALinear):
                 module.lora_A.requires_grad = True
                 module.lora_B.requires_grad = True
 
-        # Count total and trainable parameters
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logging.info(f"Total parameters: {total_params:,}")
         logging.info(f"Trainable LoRA parameters: {trainable_params:,}")
         logging.info(f"Trainable ratio: {100 * trainable_params / total_params:.2f}%")
 
-        # Optimizer only for LoRA parameters
         optimizer = AdamW(
             [{"params": [p for p in model.parameters() if p.requires_grad]}],
             lr=lr,
         )
     else:
-        num_params = sum(p.numel() for p in model.parameters())
-        logging.info(f"Number of parameters: {num_params:,}")
+        total_params = sum(p.numel() for p in model.parameters())
+        logging.info(f"Total trainable parameters (full fine-tuning): {total_params:,}")
+        optimizer = AdamW(model.parameters(), lr=lr)
 
-        optimizer = AdamW(
-            [{"params": model.parameters()}],
-            lr=lr,
-        )
-
-    # Load basketball dataset (filtered to "player" category)
+    # Datasets (basketball player detection)
     dataset = BasketballDetection(split="train")
     val_dataset = BasketballDetection(split="val")
+    test_dataset = BasketballDetection(split="test")
 
-    # Handle overfit batch size
+    # Overfit subset handling
     if overfit_batch_size is not None and overfit_batch_size > 0:
         logging.info(
-            f"Overfitting mode enabled: using first {overfit_batch_size} training samples for both train and val"
+            f"Overfitting mode: using first {overfit_batch_size} training samples for both train and val"
         )
-        # Limit the dataset to first N samples by modifying the underlying dataset
         train_full = BasketballDetection(split="train")
-        # Truncate the underlying COCO dataset
         train_full.dataset.image_ids = train_full.dataset.image_ids[:overfit_batch_size]
         dataset = train_full
 
-        # Use the same subset for validation
         val_full = BasketballDetection(split="train")
         val_full.dataset.image_ids = val_full.dataset.image_ids[:overfit_batch_size]
         val_dataset = val_full
 
+        test_full = BasketballDetection(split="train")
+        test_full.dataset.image_ids = test_full.dataset.image_ids[:overfit_batch_size]
+        test_dataset = test_full
+
     logging.info(f"Train dataset size: {len(dataset)}")
     logging.info(f"Val dataset size: {len(val_dataset)}")
-    logging.info(
-        f"Validation will use {min(validation_samples, len(val_dataset))} samples"
-    )
+    logging.info(f"Test dataset size: {len(test_dataset)}")
 
-    # Run initial validation
+    # Initial validation
     gt_validation_score = validate_with_gt(val_dataset, max_samples=validation_samples)
     logging.info(f"GT validation f1: {round(gt_validation_score['f1'], 4)}")
 
     initial_validation_score = validate(
         model, val_dataset, step=0, max_samples=validation_samples
     )
+
     best_validation_score = initial_validation_score["f1"]
+    best_validation_step = 0
     logging.info(f"Initial validation f1: {round(initial_validation_score['f1'], 4)}")
+
+    initial_test_score = validate(
+        model, test_dataset, step=0, max_samples=validation_samples
+    )
 
     wandb.log(
         {
@@ -486,6 +379,9 @@ def main(
             "initial_validation_f1": initial_validation_score["f1"],
             "initial_validation_precision": initial_validation_score["precision"],
             "initial_validation_recall": initial_validation_score["recall"],
+            "initial_test_f1": initial_test_score["f1"],
+            "initial_test_precision": initial_test_score["precision"],
+            "initial_test_recall": initial_test_score["recall"],
         },
         step=0,
     )
@@ -493,25 +389,11 @@ def main(
     total_steps = epochs * len(dataset) // grad_accum_steps
     pbar = tqdm(total=total_steps)
 
+    model.train()
     i = 0
     for epoch in range(epochs):
         for sample in dataset:
             i += 1
-
-            with torch.no_grad():
-                img_emb = model._run_vision_encoder(sample["image"])
-                bos_emb = text_encoder(
-                    torch.tensor(
-                        [[model.config.tokenizer.bos_id]], device=model.device
-                    ),
-                    model.text,
-                )
-                eos_emb = text_encoder(
-                    torch.tensor(
-                        [[model.config.tokenizer.eos_id]], device=model.device
-                    ),
-                    model.text,
-                )
 
             boxes_by_class = {}
             for box, cls in zip(sample["boxes"], sample["class_names"]):
@@ -519,93 +401,14 @@ def main(
 
             total_loss = None
             for class_name, boxes_list in boxes_by_class.items():
-                with torch.no_grad():
-                    # Build the instruction using the same detect template as inference
-                    detect_template = model.config.tokenizer.templates["detect"]
-                    object_tokens = model.tokenizer.encode(" " + class_name).ids
-                    instruction_token_ids = (
-                        detect_template["prefix"]
-                        + object_tokens
-                        + detect_template["suffix"]
-                    )
-                    instruction_tokens = torch.tensor(
-                        [instruction_token_ids],
-                        dtype=torch.long,
-                        device=model.device,
-                    )
-                    instruction_emb = text_encoder(instruction_tokens, model.text)
-
-                cs_emb = []
-                cs_labels = []
-                c_idx = []
-                s_idx = []
-                for bb in boxes_list:
-                    # Move boxes to model device (already float32 from dataset)
-                    bb = bb.to(device=model.device)
-
-                    # Interpret bb as [x_min, y_min, w, h] and convert to center coords
-                    x_min, y_min, w_box, h_box = bb
-                    x_center = x_min + w_box / 2.0
-                    y_center = y_min + h_box / 2.0
-                    l_cs = len(cs_emb)
-                    cs_emb.extend(
-                        [
-                            encode_coordinate(x_center.unsqueeze(0), model.region),
-                            encode_coordinate(y_center.unsqueeze(0), model.region),
-                            encode_size(bb[2:4], model.region),
-                        ]
-                    )
-                    c_idx.extend([l_cs, l_cs + 1])
-                    s_idx.append(l_cs + 2)
-
-                    # Create coordinate bin labels using center coordinates
-                    coord_labels = [
-                        int(min(max(torch.round(p * 1023), 0), 1023).item())
-                        for p in (x_center, y_center)
-                    ]
-
-                    # Create size bin labels using log-scale mapping
-                    s_log2_bins = []
-                    for s_val in bb[2:4]:
-                        s_val = float(s_val)
-                        s_clamped = max(s_val, 1 / 1024)
-                        s_log2 = math.log2(s_clamped)
-                        mapped = (s_log2 + 10.0) / 10.0 * 1023.0
-                        s_bin = int(round(mapped))
-                        s_bin = max(min(s_bin, 1023), 0)
-                        s_log2_bins.append(s_bin)
-
-                    # Combine coordinate and size bin labels
-                    cs_labels.extend(coord_labels + s_log2_bins)
-
-                if len(cs_emb) == 0:
-                    continue
-                cs_emb = torch.stack(cs_emb)
-
-                inputs_embeds = torch.cat(
-                    [bos_emb, img_emb[None], instruction_emb, cs_emb[None], eos_emb],
-                    dim=1,
+                boxes_tensor = torch.stack(
+                    [bb.to(dtype=torch.float32) for bb in boxes_list]
                 )
-                prefix = inputs_embeds.size(1) - cs_emb.size(0)
-                c_idx = (
-                    torch.tensor(c_idx, dtype=torch.long, device=model.device) + prefix
-                )
-                s_idx = (
-                    torch.tensor(s_idx, dtype=torch.long, device=model.device) + prefix
-                )
-
-                hidden = _produce_hidden(
-                    inputs_embeds=inputs_embeds, w=model.text, config=model.config.text
-                )
-
-                loss = region_loss(
-                    hidden_states=hidden,
-                    w=model.region,
-                    labels=torch.tensor(
-                        cs_labels, dtype=torch.int64, device=model.device
-                    ),
-                    c_idx=c_idx,
-                    s_idx=s_idx,
+                loss = teacher_forced_region_loss(
+                    model,
+                    sample["image"],
+                    class_name,
+                    boxes_tensor,
                 )
                 if total_loss is None:
                     total_loss = loss
@@ -613,18 +416,22 @@ def main(
                     total_loss = total_loss + loss
 
             if total_loss is not None:
-                total_loss.backward()
+                (total_loss / max(len(boxes_by_class), 1)).backward()
 
             if i % grad_accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
-                lr_val = lr_schedule(i / grad_accum_steps, total_steps, base_lr=lr)
+                lr_val = lr_schedule(i // grad_accum_steps, total_steps, base_lr=lr)
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = lr_val
 
                 current_step = i // grad_accum_steps
-                loss_val = total_loss.item() if total_loss is not None else 0.0
+                loss_val = (
+                    total_loss.item() / max(len(boxes_by_class), 1)
+                    if total_loss is not None
+                    else 0.0
+                )
                 pbar.set_postfix({"step": current_step, "loss": loss_val})
                 pbar.update(1)
 
@@ -645,7 +452,6 @@ def main(
                         val_dataset,
                         step=current_step,
                         max_samples=validation_samples,
-                        max_plot_samples=max_plot_samples,
                     )
                     logging.info(f"Validation f1: {round(validation_score['f1'], 4)}")
 
@@ -658,17 +464,17 @@ def main(
                         step=current_step,
                     )
 
-                    # Save best model
+                    # Save best model (LoRA-only if enabled)
                     if validation_score["f1"] > best_validation_score:
                         best_validation_score = validation_score["f1"]
+                        best_validation_step = current_step
                         if use_lora:
-                            # Save only LoRA parameters
                             save_file(
                                 get_lora_state_dict(model),
                                 f"moondream_lora_best_step_{current_step}.safetensors",
                             )
                             logging.info(
-                                f"Saved best LoRA adapter with F1: {round(best_validation_score, 4)}"
+                                f"Saved best LoRA adapter at step {current_step} with F1: {round(best_validation_score, 4)}"
                             )
                         else:
                             save_file(
@@ -676,13 +482,52 @@ def main(
                                 f"moondream_best_step_{current_step}.safetensors",
                             )
                             logging.info(
-                                f"Saved best model with F1: {round(best_validation_score, 4)}"
+                                f"Saved best full model at step {current_step} with F1: {round(best_validation_score, 4)}"
                             )
+    pbar.close()
+
+    # Load and test the best model
+    logging.info(f"Loading best model from step {best_validation_step}")
+    if use_lora:
+        # Load best LoRA weights
+        best_state_dict = load_file(
+            f"moondream_lora_best_step_{best_validation_step}.safetensors"
+        )
+        model.load_state_dict(best_state_dict, strict=False)
+        logging.info(f"Loaded best LoRA adapter from step {best_validation_step}")
+    else:
+        # Load best full model
+        best_state_dict = load_file(
+            f"moondream_best_step_{best_validation_step}.safetensors"
+        )
+        model.load_state_dict(best_state_dict)
+        logging.info(f"Loaded best full model from step {best_validation_step}")
+
+    # Run final test on the best model
+    model.eval()
+    test_score = validate(
+        model,
+        test_dataset,
+        step=best_validation_step,
+        max_samples=validation_samples,
+    )
+    logging.info(
+        f"Test f1 (best model from step {best_validation_step}): {round(test_score['f1'], 4)}"
+    )
+
+    wandb.log(
+        {
+            "final_test_f1": test_score["f1"],
+            "final_test_precision": test_score["precision"],
+            "final_test_recall": test_score["recall"],
+            "best_validation_step": best_validation_step,
+        },
+        step=best_validation_step,
+    )
     wandb.finish()
 
-    # Replace with your desired output location.
+    # Final checkpoint
     if use_lora:
-        # Save only LoRA parameters
         save_file(
             get_lora_state_dict(model),
             "moondream_lora_finetune.safetensors",
@@ -700,7 +545,7 @@ if __name__ == "__main__":
     """
     Run with Fire CLI. Examples:
         python sft_trainer.py
-        python sft_trainer.py --lr=1e-3 --epochs=20
-        python sft_trainer.py --use_lora=False
+        python sft_trainer.py --lr=1e-5 --epochs=5
+        python sft_trainer.py --use_lora=True
     """
     fire.Fire(main)

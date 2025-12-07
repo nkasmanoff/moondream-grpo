@@ -69,7 +69,7 @@ python grpo_trainer.py --learning_rate=5e-5 --batch_size=5 --num_rollouts=5 --nu
 
 ## Loading LoRA adapters trained with `sft_trainer.py`
 
-The SFT trainer in `sft_trainer.py` can fine-tune Moondream-2 using LoRA adapters implemented in `trainer_helpers.py` (via the `LoRALinear` wrapper), **not** the built-in `moondream2/lora.py` / `variant_state_dict` mechanism.
+The SFT trainer in `sft_trainer.py` can fine-tune Moondream-2 using LoRA adapters implemented in `trainer_helpers.py` (via the `LoRALinear` wrapper).
 
 When you run `sft_trainer.py` with `use_lora=True`, it will save LoRA-only checkpoints such as:
 
@@ -126,7 +126,7 @@ print("Missing keys:", missing)
 print("Unexpected keys:", unexpected)
 ```
 
-At this point, `model` is the base Moondream-2 model plus your trained LoRA adapters, and you can call the usual detection API (e.g. via `moondream2.moondream_functions.detect(model, image, object_str, settings, temperature=0.0)` or `model.detect(...)`) for inference. Because these adapters live inside `LoRALinear` wrappers from `trainer_helpers.py`, they **cannot** be loaded via `moondream2.lora.variant_state_dict` or Hugging Face variant IDs; they must be loaded directly into the Python model as shown above.
+At this point, `model` is the base Moondream-2 model plus your trained LoRA adapters, and you can call the usual detection API (e.g. via `moondream2.moondream_functions.detect(model, image, object_str, settings, temperature=0.0)` or `model.detect(...)`) for inference. Because these adapters live inside `LoRALinear` wrappers from `trainer_helpers.py`, they must be loaded directly into the Python model as shown above.
 
 ## References
 

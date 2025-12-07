@@ -27,7 +27,7 @@ Training with custom gradient accumulation:
     python sft_trainer.py --grad_accum_steps=16 --eval_interval=10
 
 Training with overfitting mode:
-    python sft_trainer.py --overfit_batch_size=8 --epochs=10
+    python sft_trainer.py --overfit_batch_size=4 --epochs=50 --use_lora=True --grad_accum_steps=4 --eval_interval=4
 """
 
 import logging
@@ -116,7 +116,6 @@ def teacher_forced_region_loss(
         top_p=0.0,
         spatial_refs=None,
         attn_mask=None,
-        lora=None,
     )
     # Hidden state corresponding to the last prompt token
     hidden = hidden_BC[:, -1:, :]
@@ -163,7 +162,7 @@ def teacher_forced_region_loss(
         next_emb = encode_coordinate(x_center_tensor, model.region)
         mask[:, :, pos] = 1
         pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids, lora=None)
+        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids)
         pos += 1
 
         # ----- Y coordinate step -----
@@ -187,7 +186,7 @@ def teacher_forced_region_loss(
         next_emb = encode_coordinate(y_center_tensor, model.region)
         mask[:, :, pos] = 1
         pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids, lora=None)
+        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids)
         pos += 1
 
         # ----- Size step (log-scale bins for w, h) -----
@@ -213,7 +212,7 @@ def teacher_forced_region_loss(
         next_emb = encode_size(size_tensor, model.region).unsqueeze(0).unsqueeze(0)
         mask[:, :, pos] = 1
         pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids, lora=None)
+        _, hidden = model._decode_one_tok(next_emb, mask, pos_ids)
         pos += 1
 
     if n_terms == 0:
@@ -306,18 +305,19 @@ def main(
             target_modules=lora_target_modules,
         )
 
-        # Freeze all base parameters, then unfreeze only LoRA weights
+        # Freeze all base parameters, then unfreeze only LoRA weights and region parameters
         for param in model.parameters():
             param.requires_grad = False
         for module in model.modules():
             if isinstance(module, LoRALinear):
                 module.lora_A.requires_grad = True
                 module.lora_B.requires_grad = True
-
+        for param in model.region.parameters():
+            param.requires_grad = True
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logging.info(f"Total parameters: {total_params:,}")
-        logging.info(f"Trainable LoRA parameters: {trainable_params:,}")
+        logging.info(f"Trainable LoRA and region parameters: {trainable_params:,}")
         logging.info(f"Trainable ratio: {100 * trainable_params / total_params:.2f}%")
 
         optimizer = AdamW(

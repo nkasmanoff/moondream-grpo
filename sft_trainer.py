@@ -1,5 +1,23 @@
 """
 Graciously adapted from https://github.com/moondream-ai/moondream/blob/main/finetune_region.py
+
+LoRA Fine-Tuning:
+-----------------
+This trainer supports both full fine-tuning and LoRA (Low-Rank Adaptation) fine-tuning.
+
+LoRA Benefits:
+- Much fewer trainable parameters (~1-2% of full model)
+- Faster training and lower memory usage
+- Smaller checkpoint files (only LoRA weights saved)
+- Can be merged with base model or swapped at inference time
+
+To enable LoRA, set USE_LORA = True and configure:
+- LORA_RANK: Rank of LoRA matrices (8-64, default 16)
+- LORA_ALPHA: Scaling factor (typically 2x rank, default 32)
+- LORA_DROPOUT: Dropout probability (default 0.1)
+- LORA_TARGET_MODULES: Which layers to apply LoRA to
+
+LoRA adapters are saved separately as "moondream_lora_*.safetensors"
 """
 
 import torch
@@ -19,6 +37,111 @@ from safetensors.torch import load_file
 
 # Import basketball dataset
 from datasets.basketball_dataset import BasketballCocoDataset
+
+
+# LoRA Implementation
+class LoRALinear(torch.nn.Module):
+    """
+    LoRA-enhanced Linear layer that wraps an existing Linear layer.
+    During training, the original weights are frozen and only LoRA weights are trained.
+    """
+
+    def __init__(
+        self,
+        original_layer: torch.nn.Module,
+        rank: int = 16,
+        alpha: float = 32,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.original_layer = original_layer
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+
+        in_features = original_layer.in_features
+        out_features = original_layer.out_features
+
+        # LoRA matrices
+        self.lora_A = torch.nn.Parameter(torch.zeros(in_features, rank))
+        self.lora_B = torch.nn.Parameter(torch.zeros(rank, out_features))
+        self.dropout = torch.nn.Dropout(dropout) if dropout > 0 else None
+
+        # Initialize A with kaiming uniform and B with zeros
+        torch.nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        torch.nn.init.zeros_(self.lora_B)
+
+        # Freeze original layer
+        for param in self.original_layer.parameters():
+            param.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with LoRA."""
+        original_output = self.original_layer(x)
+
+        # Apply LoRA
+        if self.dropout is not None:
+            x_lora = self.dropout(x)
+        else:
+            x_lora = x
+
+        lora_output = (x_lora @ self.lora_A @ self.lora_B) * self.scaling
+        return original_output + lora_output
+
+
+def inject_lora_into_model(
+    model: torch.nn.Module,
+    rank: int = 16,
+    alpha: float = 32,
+    dropout: float = 0.1,
+    target_modules: list = None,
+):
+    """
+    Replace target Linear layers in the model with LoRA-enhanced versions.
+    This modifies the model in-place.
+    """
+    if target_modules is None:
+        target_modules = ["qkv", "proj", "fc1", "fc2"]
+
+    lora_params = []
+
+    # Inject LoRA into text model layers
+    for i, block in enumerate(model.text.blocks):
+        # Attention layers
+        if "qkv" in target_modules and hasattr(block.attn, "qkv"):
+            original = block.attn.qkv
+            block.attn.qkv = LoRALinear(original, rank, alpha, dropout)
+            lora_params.extend([block.attn.qkv.lora_A, block.attn.qkv.lora_B])
+
+        if "proj" in target_modules and hasattr(block.attn, "proj"):
+            original = block.attn.proj
+            block.attn.proj = LoRALinear(original, rank, alpha, dropout)
+            lora_params.extend([block.attn.proj.lora_A, block.attn.proj.lora_B])
+
+        # MLP layers
+        if "fc1" in target_modules and hasattr(block.mlp, "fc1"):
+            original = block.mlp.fc1
+            block.mlp.fc1 = LoRALinear(original, rank, alpha, dropout)
+            lora_params.extend([block.mlp.fc1.lora_A, block.mlp.fc1.lora_B])
+
+        if "fc2" in target_modules and hasattr(block.mlp, "fc2"):
+            original = block.mlp.fc2
+            block.mlp.fc2 = LoRALinear(original, rank, alpha, dropout)
+            lora_params.extend([block.mlp.fc2.lora_A, block.mlp.fc2.lora_B])
+
+    logging.info(f"Injected LoRA into {len(lora_params) // 2} layers")
+    return lora_params
+
+
+def get_lora_state_dict(model: torch.nn.Module) -> dict:
+    """Extract only LoRA parameters from the model."""
+    lora_state_dict = {}
+    for name, module in model.named_modules():
+        if isinstance(module, LoRALinear):
+            lora_state_dict[f"{name}.lora_A"] = module.lora_A
+            lora_state_dict[f"{name}.lora_B"] = module.lora_B
+    return lora_state_dict
+
 
 # Set moondream version
 MD_VERSION = "2"
@@ -63,6 +186,14 @@ VALIDATION_SAMPLES = 250
 MAX_PLOT_SAMPLES = 25
 EVAL_INTERVAL = 50  # Evaluate every N gradient accumulation steps
 OVERFIT_BATCH_SIZE = 4  # Set to a number > 0 to overfit on a small batch
+
+# LoRA configuration
+USE_LORA = True  # Set to True to use LoRA instead of full fine-tuning
+LORA_RANK = 16  # Rank of LoRA matrices (higher = more parameters, more expressive)
+LORA_ALPHA = 32  # Scaling factor for LoRA (typically 2x rank)
+LORA_DROPOUT = 0.1  # Dropout for LoRA layers
+LORA_TARGET_MODULES = ["qkv", "proj", "fc1", "fc2"]  # Which layers to apply LoRA to
+
 device = "cuda" if torch.cuda.is_available() else "mps"
 
 
@@ -175,15 +306,15 @@ class BasketballDetection(Dataset):
 
         if split == "train":
             self.dataset = BasketballCocoDataset(
-                dataset_root, split="train", categories_to_use=["ball"]
+                dataset_root, split="train", categories_to_use=["player"]
             )
         elif split == "val":
             self.dataset = BasketballCocoDataset(
-                dataset_root, split="valid", categories_to_use=["ball"]
+                dataset_root, split="valid", categories_to_use=["player"]
             )
         else:
             self.dataset = BasketballCocoDataset(
-                dataset_root, split="test", categories_to_use=["ball"]
+                dataset_root, split="test", categories_to_use=["player"]
             )
 
     def __len__(self):
@@ -389,6 +520,10 @@ def main():
             "VALIDATION_SAMPLES": VALIDATION_SAMPLES,
             "EVAL_INTERVAL": EVAL_INTERVAL,
             "OVERFIT_BATCH_SIZE": OVERFIT_BATCH_SIZE,
+            "USE_LORA": USE_LORA,
+            "LORA_RANK": LORA_RANK if USE_LORA else None,
+            "LORA_ALPHA": LORA_ALPHA if USE_LORA else None,
+            "LORA_DROPOUT": LORA_DROPOUT if USE_LORA else None,
             "dataset": "basketball-ball-detection",
             "md_version": MD_VERSION,
         },
@@ -444,15 +579,39 @@ def main():
 
     logging.info(f"Model successfully loaded and moved to {device}")
 
-    num_params = sum(p.numel() for p in model.parameters())
-    logging.info(f"Number of parameters: {num_params:,}")
+    # Apply LoRA if enabled
+    if USE_LORA:
+        logging.info("Applying LoRA to model...")
+        lora_params = inject_lora_into_model(
+            model,
+            rank=LORA_RANK,
+            alpha=LORA_ALPHA,
+            dropout=LORA_DROPOUT,
+            target_modules=LORA_TARGET_MODULES,
+        )
 
-    optimizer = AdamW(
-        [{"params": model.parameters()}],
-        lr=LR,
-    )
+        # Count total and trainable parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logging.info(f"Total parameters: {total_params:,}")
+        logging.info(f"Trainable LoRA parameters: {trainable_params:,}")
+        logging.info(f"Trainable ratio: {100 * trainable_params / total_params:.2f}%")
 
-    # Load basketball dataset (filtered to "ball" category)
+        # Optimizer only for LoRA parameters
+        optimizer = AdamW(
+            [{"params": [p for p in model.parameters() if p.requires_grad]}],
+            lr=LR,
+        )
+    else:
+        num_params = sum(p.numel() for p in model.parameters())
+        logging.info(f"Number of parameters: {num_params:,}")
+
+        optimizer = AdamW(
+            [{"params": model.parameters()}],
+            lr=LR,
+        )
+
+    # Load basketball dataset (filtered to "player" category)
     dataset = BasketballDetection(split="train")
     val_dataset = BasketballDetection(split="val")
 
@@ -661,20 +820,39 @@ def main():
                     # Save best model
                     if validation_score["f1"] > best_validation_score:
                         best_validation_score = validation_score["f1"]
-                        save_file(
-                            model.state_dict(),
-                            f"moondream_best_step_{current_step}.safetensors",
-                        )
-                        logging.info(
-                            f"Saved best model with F1: {round(best_validation_score, 4)}"
-                        )
+                        if USE_LORA:
+                            # Save only LoRA parameters
+                            save_file(
+                                get_lora_state_dict(model),
+                                f"moondream_lora_best_step_{current_step}.safetensors",
+                            )
+                            logging.info(
+                                f"Saved best LoRA adapter with F1: {round(best_validation_score, 4)}"
+                            )
+                        else:
+                            save_file(
+                                model.state_dict(),
+                                f"moondream_best_step_{current_step}.safetensors",
+                            )
+                            logging.info(
+                                f"Saved best model with F1: {round(best_validation_score, 4)}"
+                            )
     wandb.finish()
 
     # Replace with your desired output location.
-    save_file(
-        model.state_dict(),
-        "moondream_finetune.safetensors",
-    )
+    if USE_LORA:
+        # Save only LoRA parameters
+        save_file(
+            get_lora_state_dict(model),
+            "moondream_lora_finetune.safetensors",
+        )
+        logging.info("Saved final LoRA adapter to moondream_lora_finetune.safetensors")
+    else:
+        save_file(
+            model.state_dict(),
+            "moondream_finetune.safetensors",
+        )
+        logging.info("Saved final model to moondream_finetune.safetensors")
 
 
 if __name__ == "__main__":

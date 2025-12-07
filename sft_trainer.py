@@ -62,9 +62,21 @@ class LoRALinear(torch.nn.Module):
         in_features = original_layer.in_features
         out_features = original_layer.out_features
 
-        # LoRA matrices
-        self.lora_A = torch.nn.Parameter(torch.zeros(in_features, rank))
-        self.lora_B = torch.nn.Parameter(torch.zeros(rank, out_features))
+        # LoRA matrices (match dtype/device of the wrapped layer)
+        weight = getattr(original_layer, "weight", None)
+        if isinstance(weight, torch.nn.Parameter):
+            lora_dtype = weight.dtype
+            lora_device = weight.device
+        else:
+            lora_dtype = torch.get_default_dtype()
+            lora_device = None
+
+        self.lora_A = torch.nn.Parameter(
+            torch.zeros(in_features, rank, dtype=lora_dtype, device=lora_device)
+        )
+        self.lora_B = torch.nn.Parameter(
+            torch.zeros(rank, out_features, dtype=lora_dtype, device=lora_device)
+        )
         self.dropout = torch.nn.Dropout(dropout) if dropout > 0 else None
 
         # Initialize A with kaiming uniform and B with zeros
@@ -85,7 +97,16 @@ class LoRALinear(torch.nn.Module):
         else:
             x_lora = x
 
+        # Ensure dtype compatibility for matmul
+        if x_lora.dtype != self.lora_A.dtype:
+            x_lora = x_lora.to(self.lora_A.dtype)
+
         lora_output = (x_lora @ self.lora_A @ self.lora_B) * self.scaling
+
+        # Match output dtype to the original layer output
+        if lora_output.dtype != original_output.dtype:
+            lora_output = lora_output.to(original_output.dtype)
+
         return original_output + lora_output
 
 

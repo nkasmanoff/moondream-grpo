@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from PIL import Image
+import torch
 from torch.utils.data import Dataset
 
 
@@ -102,6 +103,59 @@ class BasketballCocoDataset(Dataset):
         }
 
         return image, label, [boxes]
+
+
+class BasketballDetection(Dataset):
+    def __init__(self, split: str = "train"):
+        """Wrapper for basketball dataset to match SFT trainer format"""
+        dataset_root = "datasets/basketball-player-detection-3.v1i.coco"
+
+        if split == "train":
+            self.dataset = BasketballCocoDataset(
+                dataset_root, split="train", categories_to_use=["player"]
+            )
+        elif split == "val":
+            self.dataset = BasketballCocoDataset(
+                dataset_root, split="valid", categories_to_use=["player"]
+            )
+        else:
+            self.dataset = BasketballCocoDataset(
+                dataset_root, split="test", categories_to_use=["player"]
+            )
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        image, label, boxes = self.dataset[idx]
+
+        # Convert from normalized [x_min, y_min, x_max, y_max] format
+        # to [x, y, w, h] format expected by SFT trainer
+        flat_boxes = []
+        class_names = []
+        for box in boxes:
+            x = box["x_min"]
+            y = box["y_min"]
+            w = box["x_max"] - box["x_min"]
+            h = box["y_max"] - box["y_min"]
+            flat_boxes.append([x, y, w, h])
+            class_names.append(label)
+
+        # Use float32 for better numerical stability and compatibility
+        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
+        image_id = torch.tensor([idx], dtype=torch.int64)
+
+        return {
+            "image": image,
+            "boxes": flat_boxes,
+            "class_names": class_names,
+            "image_id": image_id,
+        }
+
+    def get_sample_for_validation(self, idx):
+        """Get sample in format compatible with validation functions"""
+        # Just use the underlying dataset's format which is already correct
+        return self.dataset[idx]
 
 
 def load_object_detection_dataset(split):

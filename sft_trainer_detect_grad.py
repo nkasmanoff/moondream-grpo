@@ -43,7 +43,7 @@ from safetensors.torch import load_file, save_file
 import wandb
 import fire
 
-from datasets.basketball_dataset import BasketballCocoDataset
+from datasets.basketball_dataset import BasketballDetection
 from trainer_helpers import (
     LoRALinear,
     inject_lora_into_model,
@@ -64,60 +64,6 @@ from moondream2.region import (
     encode_coordinate,
     encode_size,
 )
-
-
-class BasketballDetection(Dataset):
-    def __init__(self, split: str = "train"):
-        """Wrapper for basketball dataset to match SFT trainer format"""
-        dataset_root = "datasets/basketball-player-detection-3.v1i.coco"
-
-        if split == "train":
-            self.dataset = BasketballCocoDataset(
-                dataset_root, split="train", categories_to_use=["player"]
-            )
-        elif split == "val":
-            self.dataset = BasketballCocoDataset(
-                dataset_root, split="valid", categories_to_use=["player"]
-            )
-        else:
-            self.dataset = BasketballCocoDataset(
-                dataset_root, split="test", categories_to_use=["player"]
-            )
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        image, label, boxes = self.dataset[idx]
-
-        # Convert from normalized [x_min, y_min, x_max, y_max] format
-        # to [x, y, w, h] format expected by SFT trainer
-        flat_boxes = []
-        class_names = []
-        for box in boxes:
-            x = box["x_min"]
-            y = box["y_min"]
-            w = box["x_max"] - box["x_min"]
-            h = box["y_max"] - box["y_min"]
-            flat_boxes.append([x, y, w, h])
-            class_names.append(label)
-
-        # Use float32 for better numerical stability and compatibility
-        flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)
-        image_id = torch.tensor([idx], dtype=torch.int64)
-
-        return {
-            "image": image,
-            "boxes": flat_boxes,
-            "class_names": class_names,
-            "image_id": image_id,
-        }
-
-    def get_sample_for_validation(self, idx):
-        """Get sample in format compatible with validation functions"""
-        # Just use the underlying dataset's format which is already correct
-        return self.dataset[idx]
-
 
 device = "cuda" if torch.cuda.is_available() else "mps"
 
@@ -386,6 +332,7 @@ def main(
     # Datasets (basketball player detection)
     dataset = BasketballDetection(split="train")
     val_dataset = BasketballDetection(split="val")
+    test_dataset = BasketballDetection(split="test")
 
     # Overfit subset handling
     if overfit_batch_size is not None and overfit_batch_size > 0:
@@ -400,8 +347,13 @@ def main(
         val_full.dataset.image_ids = val_full.dataset.image_ids[:overfit_batch_size]
         val_dataset = val_full
 
+        test_full = BasketballDetection(split="train")
+        test_full.dataset.image_ids = test_full.dataset.image_ids[:overfit_batch_size]
+        test_dataset = test_full
+
     logging.info(f"Train dataset size: {len(dataset)}")
     logging.info(f"Val dataset size: {len(val_dataset)}")
+    logging.info(f"Test dataset size: {len(test_dataset)}")
 
     # Initial validation
     gt_validation_score = validate_with_gt(val_dataset, max_samples=validation_samples)
@@ -410,8 +362,14 @@ def main(
     initial_validation_score = validate(
         model, val_dataset, step=0, max_samples=validation_samples
     )
+
     best_validation_score = initial_validation_score["f1"]
+    best_validation_step = 0
     logging.info(f"Initial validation f1: {round(initial_validation_score['f1'], 4)}")
+
+    initial_test_score = validate(
+        model, test_dataset, step=0, max_samples=validation_samples
+    )
 
     wandb.log(
         {
@@ -421,6 +379,9 @@ def main(
             "initial_validation_f1": initial_validation_score["f1"],
             "initial_validation_precision": initial_validation_score["precision"],
             "initial_validation_recall": initial_validation_score["recall"],
+            "initial_test_f1": initial_test_score["f1"],
+            "initial_test_precision": initial_test_score["precision"],
+            "initial_test_recall": initial_test_score["recall"],
         },
         step=0,
     )
@@ -506,13 +467,14 @@ def main(
                     # Save best model (LoRA-only if enabled)
                     if validation_score["f1"] > best_validation_score:
                         best_validation_score = validation_score["f1"]
+                        best_validation_step = current_step
                         if use_lora:
                             save_file(
                                 get_lora_state_dict(model),
                                 f"moondream_lora_best_step_{current_step}_detect_grad.safetensors",
                             )
                             logging.info(
-                                f"Saved best LoRA adapter (detect_grad) with F1: {round(best_validation_score, 4)}"
+                                f"Saved best LoRA adapter (detect_grad) at step {current_step} with F1: {round(best_validation_score, 4)}"
                             )
                         else:
                             save_file(
@@ -520,9 +482,48 @@ def main(
                                 f"moondream_best_step_{current_step}_detect_grad.safetensors",
                             )
                             logging.info(
-                                f"Saved best full model (detect_grad) with F1: {round(best_validation_score, 4)}"
+                                f"Saved best full model (detect_grad) at step {current_step} with F1: {round(best_validation_score, 4)}"
                             )
+    pbar.close()
 
+    # Load and test the best model
+    logging.info(f"Loading best model from step {best_validation_step}")
+    if use_lora:
+        # Load best LoRA weights
+        best_state_dict = load_file(
+            f"moondream_lora_best_step_{best_validation_step}_detect_grad.safetensors"
+        )
+        model.load_state_dict(best_state_dict, strict=False)
+        logging.info(f"Loaded best LoRA adapter from step {best_validation_step}")
+    else:
+        # Load best full model
+        best_state_dict = load_file(
+            f"moondream_best_step_{best_validation_step}_detect_grad.safetensors"
+        )
+        model.load_state_dict(best_state_dict)
+        logging.info(f"Loaded best full model from step {best_validation_step}")
+
+    # Run final test on the best model
+    model.eval()
+    test_score = validate(
+        model,
+        test_dataset,
+        step=best_validation_step,
+        max_samples=validation_samples,
+    )
+    logging.info(
+        f"Test f1 (best model from step {best_validation_step}): {round(test_score['f1'], 4)}"
+    )
+
+    wandb.log(
+        {
+            "final_test_f1": test_score["f1"],
+            "final_test_precision": test_score["precision"],
+            "final_test_recall": test_score["recall"],
+            "best_validation_step": best_validation_step,
+        },
+        step=best_validation_step,
+    )
     wandb.finish()
 
     # Final checkpoint

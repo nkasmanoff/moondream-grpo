@@ -738,21 +738,26 @@ def main():
                 for bb in boxes_list:
                     # Move boxes to model device (already float32 from dataset)
                     bb = bb.to(device=model.device)
+
+                    # Interpret bb as [x_min, y_min, w, h] and convert to center coords
+                    x_min, y_min, w_box, h_box = bb
+                    x_center = x_min + w_box / 2.0
+                    y_center = y_min + h_box / 2.0
                     l_cs = len(cs_emb)
                     cs_emb.extend(
                         [
-                            encode_coordinate(bb[0].unsqueeze(0), model.region),
-                            encode_coordinate(bb[1].unsqueeze(0), model.region),
+                            encode_coordinate(x_center.unsqueeze(0), model.region),
+                            encode_coordinate(y_center.unsqueeze(0), model.region),
                             encode_size(bb[2:4], model.region),
                         ]
                     )
                     c_idx.extend([l_cs, l_cs + 1])
                     s_idx.append(l_cs + 2)
 
-                    # Create coordinate bin labels
+                    # Create coordinate bin labels using center coordinates
                     coord_labels = [
                         int(min(max(torch.round(p * 1023), 0), 1023).item())
-                        for p in bb[:2]
+                        for p in (x_center, y_center)
                     ]
 
                     # Create size bin labels using log-scale mapping

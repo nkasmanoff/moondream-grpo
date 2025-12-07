@@ -45,17 +45,17 @@ from moondream2.region import (
 
 
 # Hyperparameters (tuned for stability; feel free to adjust)
-LR = 1e-4
-EPOCHS = 5
+LR = 1e-5
+EPOCHS = 50
 GRAD_ACCUM_STEPS = 1
 VALIDATION_SAMPLES = 250
-EVAL_INTERVAL = 50
-OVERFIT_BATCH_SIZE: Optional[int] = 4  # Set >0 to overfit on a tiny subset
+EVAL_INTERVAL = 1
+OVERFIT_BATCH_SIZE: Optional[int] = 1  # Set >0 to overfit on a tiny subset
 
 # LoRA configuration
 USE_LORA = True
-LORA_RANK = 16
-LORA_ALPHA = 32
+LORA_RANK = 32
+LORA_ALPHA = 64
 LORA_DROPOUT = 0.1
 LORA_TARGET_MODULES = ["qkv", "proj", "fc1", "fc2"]
 

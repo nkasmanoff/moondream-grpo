@@ -716,16 +716,20 @@ def main():
             total_loss = None
             for class_name, boxes_list in boxes_by_class.items():
                 with torch.no_grad():
-                    instruction = f"\n\nDetect: {class_name}\n\n"
-                    instruction_tokens = model.tokenizer.encode(instruction).ids
-                    instruction_emb = text_encoder(
-                        torch.tensor(
-                            [[instruction_tokens]],
-                            dtype=torch.long,
-                            device=model.device,
-                        ),
-                        model.text,
-                    ).squeeze(0)
+                    # Build the instruction using the same detect template as inference
+                    detect_template = model.config.tokenizer.templates["detect"]
+                    object_tokens = model.tokenizer.encode(" " + class_name).ids
+                    instruction_token_ids = (
+                        detect_template["prefix"]
+                        + object_tokens
+                        + detect_template["suffix"]
+                    )
+                    instruction_tokens = torch.tensor(
+                        [instruction_token_ids],
+                        dtype=torch.long,
+                        device=model.device,
+                    )
+                    instruction_emb = text_encoder(instruction_tokens, model.text)
 
                 cs_emb = []
                 cs_labels = []

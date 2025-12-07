@@ -106,21 +106,22 @@ class BasketballCocoDataset(Dataset):
 
 
 class BasketballDetection(Dataset):
-    def __init__(self, split: str = "train"):
+    def __init__(self, split: str = "train", categories_to_use=["player"]):
         """Wrapper for basketball dataset to match SFT trainer format"""
+        self.categories_to_use = categories_to_use
         dataset_root = "datasets/basketball-player-detection-3.v1i.coco"
 
         if split == "train":
             self.dataset = BasketballCocoDataset(
-                dataset_root, split="train", categories_to_use=["player"]
+                dataset_root, split="train", categories_to_use=categories_to_use
             )
         elif split == "val":
             self.dataset = BasketballCocoDataset(
-                dataset_root, split="valid", categories_to_use=["player"]
+                dataset_root, split="valid", categories_to_use=categories_to_use
             )
         else:
             self.dataset = BasketballCocoDataset(
-                dataset_root, split="test", categories_to_use=["player"]
+                dataset_root, split="test", categories_to_use=categories_to_use
             )
 
     def __len__(self):
@@ -139,7 +140,7 @@ class BasketballDetection(Dataset):
             w = box["x_max"] - box["x_min"]
             h = box["y_max"] - box["y_min"]
             flat_boxes.append([x, y, w, h])
-            class_names.append(label)
+            class_names.append(self.categories_to_use[label.replace("-", " ")])
 
         # Use float32 for better numerical stability and compatibility
         flat_boxes = torch.as_tensor(flat_boxes, dtype=torch.float32)

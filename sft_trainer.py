@@ -27,7 +27,7 @@ Training with custom gradient accumulation:
     python sft_trainer.py --grad_accum_steps=16 --eval_interval=10
 
 Training with overfitting mode:
-    python sft_trainer.py --overfit_batch_size=4 --epochs=50 --use_lora=True --grad_accum_steps=4 --eval_interval=4
+    python sft_trainer.py --overfit_batch_size=4 --epochs=5 --use_lora=True --grad_accum_steps=4 --eval_interval=1
 """
 
 import logging
@@ -264,6 +264,7 @@ def main(
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     os.makedirs("predictions", exist_ok=True)
+    os.makedirs("model_artifacts", exist_ok=True)
 
     wandb.init(
         project=wandb_project,
@@ -464,22 +465,22 @@ def main(
                         step=current_step,
                     )
 
-                    # Save best model (LoRA-only if enabled)
+                    # Save best model (LoRA + region if enabled, otherwise full model)
                     if validation_score["f1"] > best_validation_score:
                         best_validation_score = validation_score["f1"]
                         best_validation_step = current_step
                         if use_lora:
                             save_file(
-                                get_lora_state_dict(model),
-                                f"moondream_lora_best_step_{current_step}.safetensors",
+                                get_lora_state_dict(model, include_region=True),
+                                f"model_artifacts/moondream_lora_best_step_{current_step}.safetensors",
                             )
                             logging.info(
-                                f"Saved best LoRA adapter at step {current_step} with F1: {round(best_validation_score, 4)}"
+                                f"Saved best LoRA adapter + region model at step {current_step} with F1: {round(best_validation_score, 4)}"
                             )
                         else:
                             save_file(
                                 model.state_dict(),
-                                f"moondream_best_step_{current_step}.safetensors",
+                                f"model_artifacts/moondream_best_step_{current_step}.safetensors",
                             )
                             logging.info(
                                 f"Saved best full model at step {current_step} with F1: {round(best_validation_score, 4)}"
@@ -489,16 +490,18 @@ def main(
     # Load and test the best model
     logging.info(f"Loading best model from step {best_validation_step}")
     if use_lora:
-        # Load best LoRA weights
+        # Load best LoRA weights + region model
         best_state_dict = load_file(
-            f"moondream_lora_best_step_{best_validation_step}.safetensors"
+            f"model_artifacts/moondream_lora_best_step_{best_validation_step}.safetensors"
         )
         model.load_state_dict(best_state_dict, strict=False)
-        logging.info(f"Loaded best LoRA adapter from step {best_validation_step}")
+        logging.info(
+            f"Loaded best LoRA adapter + region model from step {best_validation_step}"
+        )
     else:
         # Load best full model
         best_state_dict = load_file(
-            f"moondream_best_step_{best_validation_step}.safetensors"
+            f"model_artifacts/moondream_best_step_{best_validation_step}.safetensors"
         )
         model.load_state_dict(best_state_dict)
         logging.info(f"Loaded best full model from step {best_validation_step}")
@@ -515,29 +518,44 @@ def main(
         f"Test f1 (best model from step {best_validation_step}): {round(test_score['f1'], 4)}"
     )
 
+    # Log final test results to both step log and summary
+    # Using "test/" prefix so they appear in their own graph panel
+    final_step = best_validation_step + 1
     wandb.log(
         {
-            "final_test_f1": test_score["f1"],
-            "final_test_precision": test_score["precision"],
-            "final_test_recall": test_score["recall"],
+            "test/f1": test_score["f1"],
+            "test/precision": test_score["precision"],
+            "test/recall": test_score["recall"],
         },
-        step=0,
+        step=final_step,
+        commit=True,
     )
+
+    # Also save to run summary for easy access
+    wandb.run.summary["test/f1"] = test_score["f1"]
+    wandb.run.summary["test/precision"] = test_score["precision"]
+    wandb.run.summary["test/recall"] = test_score["recall"]
+    wandb.run.summary["best_validation_step"] = best_validation_step
+
     wandb.finish()
 
     # Final checkpoint
     if use_lora:
         save_file(
-            get_lora_state_dict(model),
-            "moondream_lora_finetune.safetensors",
+            get_lora_state_dict(model, include_region=True),
+            "model_artifacts/moondream_lora_finetune.safetensors",
         )
-        logging.info("Saved final LoRA adapter to moondream_lora_finetune.safetensors")
+        logging.info(
+            "Saved final LoRA adapter + region model to model_artifacts/moondream_lora_finetune.safetensors"
+        )
     else:
         save_file(
             model.state_dict(),
-            "moondream_finetune.safetensors",
+            "model_artifacts/moondream_finetune.safetensors",
         )
-        logging.info("Saved final model to moondream_finetune.safetensors")
+        logging.info(
+            "Saved final model to model_artifacts/moondream_finetune.safetensors"
+        )
 
 
 if __name__ == "__main__":

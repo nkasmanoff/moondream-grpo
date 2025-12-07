@@ -2,5 +2,6 @@
 **__pycache__**
 **wandb**
 **predictions/
+**model_artifacts/
 datasets/basketball-player-detection-3.v1i.coco/
 **.DS_Store

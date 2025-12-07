@@ -103,6 +103,8 @@ def inject_lora_into_model(
     if target_modules is None:
         target_modules = ["qkv", "proj", "fc1", "fc2"]
 
+    # Get the device of the model
+    model_device = next(model.parameters()).device
     lora_params = []
 
     # Inject LoRA into text model layers
@@ -110,24 +112,28 @@ def inject_lora_into_model(
         # Attention layers
         if "qkv" in target_modules and hasattr(block.attn, "qkv"):
             original = block.attn.qkv
-            block.attn.qkv = LoRALinear(original, rank, alpha, dropout)
-            lora_params.extend([block.attn.qkv.lora_A, block.attn.qkv.lora_B])
+            lora_layer = LoRALinear(original, rank, alpha, dropout).to(model_device)
+            block.attn.qkv = lora_layer
+            lora_params.extend([lora_layer.lora_A, lora_layer.lora_B])
 
         if "proj" in target_modules and hasattr(block.attn, "proj"):
             original = block.attn.proj
-            block.attn.proj = LoRALinear(original, rank, alpha, dropout)
-            lora_params.extend([block.attn.proj.lora_A, block.attn.proj.lora_B])
+            lora_layer = LoRALinear(original, rank, alpha, dropout).to(model_device)
+            block.attn.proj = lora_layer
+            lora_params.extend([lora_layer.lora_A, lora_layer.lora_B])
 
         # MLP layers
         if "fc1" in target_modules and hasattr(block.mlp, "fc1"):
             original = block.mlp.fc1
-            block.mlp.fc1 = LoRALinear(original, rank, alpha, dropout)
-            lora_params.extend([block.mlp.fc1.lora_A, block.mlp.fc1.lora_B])
+            lora_layer = LoRALinear(original, rank, alpha, dropout).to(model_device)
+            block.mlp.fc1 = lora_layer
+            lora_params.extend([lora_layer.lora_A, lora_layer.lora_B])
 
         if "fc2" in target_modules and hasattr(block.mlp, "fc2"):
             original = block.mlp.fc2
-            block.mlp.fc2 = LoRALinear(original, rank, alpha, dropout)
-            lora_params.extend([block.mlp.fc2.lora_A, block.mlp.fc2.lora_B])
+            lora_layer = LoRALinear(original, rank, alpha, dropout).to(model_device)
+            block.mlp.fc2 = lora_layer
+            lora_params.extend([lora_layer.lora_A, lora_layer.lora_B])
 
     logging.info(f"Injected LoRA into {len(lora_params) // 2} layers")
     return lora_params

@@ -416,19 +416,26 @@ def inject_lora_into_model(
     return lora_params
 
 
-def get_lora_state_dict(model: torch.nn.Module) -> dict:
+def get_lora_state_dict(model: torch.nn.Module, include_region: bool = True) -> dict:
     """
-    Extract only LoRA parameters from the model.
+    Extract LoRA parameters and optionally region model parameters from the model.
 
     Args:
         model: The model containing LoRA layers
+        include_region: Whether to include region model parameters (default: True)
 
     Returns:
-        Dictionary containing only LoRA parameters
+        Dictionary containing LoRA parameters and optionally region parameters
     """
     lora_state_dict = {}
     for name, module in model.named_modules():
         if isinstance(module, LoRALinear):
             lora_state_dict[f"{name}.lora_A"] = module.lora_A
             lora_state_dict[f"{name}.lora_B"] = module.lora_B
+
+    # Include region model parameters if requested
+    if include_region and hasattr(model, "region"):
+        for name, param in model.region.named_parameters():
+            lora_state_dict[f"region.{name}"] = param
+
     return lora_state_dict

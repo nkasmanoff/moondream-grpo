@@ -11,7 +11,6 @@ from moondream2 import (
     SpatialRefs,
 )
 from .region import decode_coordinate, encode_coordinate, decode_size, encode_size
-from .lora import variant_state_dict
 from .text import text_encoder, lm_head, text_decoder
 from .image_crops import reconstruct_from_crops
 from .vision import vision_encoder, vision_projection, prepare_crops
@@ -30,9 +29,8 @@ def _prefill(
     x: torch.Tensor,
     attn_mask: torch.Tensor,
     pos_ids: torch.Tensor,
-    lora: Optional[torch.Tensor],
 ):
-    return text_decoder(x, model.text, attn_mask, pos_ids, model.config.text, lora)
+    return text_decoder(x, model.text, attn_mask, pos_ids, model.config.text, None)
 
 
 def _decode_one_tok(
@@ -40,9 +38,8 @@ def _decode_one_tok(
     x: torch.Tensor,
     attn_mask: torch.Tensor,
     pos_ids: torch.Tensor,
-    lora: Optional[torch.Tensor],
 ):
-    hidden = text_decoder(x, model.text, attn_mask, pos_ids, model.config.text, lora)
+    hidden = text_decoder(x, model.text, attn_mask, pos_ids, model.config.text, None)
     logits = lm_head(hidden, model.text)
     return logits, hidden
 
@@ -86,7 +83,6 @@ def _prefill_prompt(
     top_p: float,
     spatial_refs: Optional[SpatialRefs] = None,
     attn_mask: Optional[torch.Tensor] = None,
-    lora: Optional[dict] = None,
 ):
     with torch.inference_mode():
         prompt_emb = text_encoder(prompt_tokens, model.text)
@@ -97,7 +93,7 @@ def _prefill_prompt(
 
         mask = attn_mask[:, :, pos : pos + prompt_emb.size(1), :]
         pos_ids = torch.arange(pos, pos + prompt_emb.size(1), dtype=torch.long)
-        hidden_BC = _prefill(model, prompt_emb, mask, pos_ids, lora)
+        hidden_BC = _prefill(model, prompt_emb, mask, pos_ids)
         logits_BV = lm_head(hidden_BC, model.text)
 
         if temperature == 0:
@@ -118,7 +114,6 @@ def _generate_points(
     pos: int,
     include_size: bool = True,
     max_objects: int = DEFAULT_MAX_OBJECTS,
-    lora: Optional[dict] = None,
     temperature: float = 0.0,
 ):
     out = []
@@ -148,7 +143,7 @@ def _generate_points(
             )
 
             mask[:, :, pos], pos_ids[0] = 1, pos
-            _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+            _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids)
             pos += 1
             y_logits = decode_coordinate(hidden, model.region)
 
@@ -168,7 +163,7 @@ def _generate_points(
 
             if include_size:
                 mask[:, :, pos], pos_ids[0] = 1, pos
-                _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+                _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids)
                 pos += 1
                 size_logits = decode_size(hidden, model.region)
 
@@ -231,7 +226,7 @@ def _generate_points(
                 )
 
             mask[:, :, pos], pos_ids[0] = 1, pos
-            logits, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+            logits, hidden = _decode_one_tok(model, next_emb, mask, pos_ids)
             pos += 1
             next_token = torch.argmax(logits, dim=-1)
 
@@ -260,14 +255,8 @@ def detect(
         device=model.device,
     )
 
-    lora = (
-        variant_state_dict(settings["variant"], device=model.device)
-        if settings is not None and "variant" in settings
-        else None
-    )
-
     _, hidden, next_token, pos = _prefill_prompt(
-        model, prompt_tokens, image.pos, temperature=0, top_p=0, lora=lora
+        model, prompt_tokens, image.pos, temperature=0, top_p=0
     )
     hidden = hidden[:, -1:, :]
 
@@ -283,7 +272,6 @@ def detect(
         pos,
         include_size=True,
         max_objects=max_objects,
-        lora=lora,
         temperature=temperature,
     )
 
@@ -300,12 +288,6 @@ def encode_image_grad(
     elif not isinstance(image, Image.Image):
         raise ValueError("image must be a PIL Image or EncodedImage")
 
-    lora = (
-        variant_state_dict(settings["variant"], device=model.device)
-        if settings is not None and "variant" in settings
-        else None
-    )
-
     img_emb = _run_vision_encoder(model, image)
     bos_emb = text_encoder(
         torch.tensor([[model.config.tokenizer.bos_id]], device=model.device),
@@ -314,7 +296,7 @@ def encode_image_grad(
     inputs_embeds = torch.cat([bos_emb, img_emb[None]], dim=1)
     mask = model.attn_mask[:, :, 0 : inputs_embeds.size(1), :]
     pos_ids = torch.arange(inputs_embeds.size(1), dtype=torch.long)
-    _prefill(model, inputs_embeds, mask, pos_ids, lora)
+    _prefill(model, inputs_embeds, mask, pos_ids)
 
     return EncodedImage(
         pos=inputs_embeds.size(1),
@@ -336,7 +318,6 @@ def _prefill_prompt_grad(
     top_p: float,
     spatial_refs: Optional[SpatialRefs] = None,
     attn_mask: Optional[torch.Tensor] = None,
-    lora: Optional[dict] = None,
 ):
     prompt_emb = text_encoder(prompt_tokens, model.text)
     torch._dynamo.mark_dynamic(prompt_emb, 1)
@@ -346,7 +327,7 @@ def _prefill_prompt_grad(
 
     mask = attn_mask[:, :, pos : pos + prompt_emb.size(1), :]
     pos_ids = torch.arange(pos, pos + prompt_emb.size(1), dtype=torch.long)
-    hidden_BC = _prefill(model, prompt_emb, mask, pos_ids, lora)
+    hidden_BC = _prefill(model, prompt_emb, mask, pos_ids)
     logits_BV = lm_head(hidden_BC, model.text)
 
     if temperature == 0:
@@ -367,7 +348,6 @@ def _generate_points_grad(
     pos: int,
     include_size: bool = True,
     max_objects: int = DEFAULT_MAX_OBJECTS,
-    lora: Optional[dict] = None,
     temperature: float = 0.0,
 ):
     out = []
@@ -396,7 +376,7 @@ def _generate_points_grad(
 
         mask[:, :, pos] = 1
         pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+        _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids)
         pos += 1
 
         y_logits = decode_coordinate(hidden, model.region)
@@ -418,7 +398,7 @@ def _generate_points_grad(
         if include_size:
             mask[:, :, pos] = 1
             pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-            _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+            _, hidden = _decode_one_tok(model, next_emb, mask, pos_ids)
             pos += 1
             size_logits = decode_size(hidden, model.region)
 
@@ -486,7 +466,7 @@ def _generate_points_grad(
 
         mask[:, :, pos] = 1
         pos_ids = torch.tensor([pos], device=model.device, dtype=torch.long)
-        logits, hidden = _decode_one_tok(model, next_emb, mask, pos_ids, lora)
+        logits, hidden = _decode_one_tok(model, next_emb, mask, pos_ids)
         pos += 1
         next_token = torch.argmax(logits, dim=-1)
 
@@ -516,14 +496,8 @@ def detect_grad(
         device=model.device,
     )
 
-    lora = (
-        variant_state_dict(settings["variant"], device=model.device)
-        if settings is not None and "variant" in settings
-        else None
-    )
-
     _, hidden, next_token, pos = _prefill_prompt_grad(
-        model, prompt_tokens, image.pos, temperature=0, top_p=0, lora=lora
+        model, prompt_tokens, image.pos, temperature=0, top_p=0
     )
     hidden = hidden[:, -1:, :]
 
@@ -539,7 +513,6 @@ def detect_grad(
         pos,
         include_size=True,
         max_objects=max_objects,
-        lora=lora,
         temperature=temperature,
     )
 

@@ -83,7 +83,7 @@ The following shell script runs a hyperparameter search for the `sft_trainer.py`
 ./run_hparam_sweep.sh
 ```
 
-The results are logged to Weights & Biases, and makes it easy to determine which config is best for your dataset.
+The results are logged to [Weights & Biases](https://wandb.ai/noahpunintended/moondream-basketball-ft-sweep), and makes it easy to determine which config is best for your dataset.
 
 Note that the `run_hparam_sweep.sh` script is just a wrapper around the `sft_trainer.py` script, so you can modify the script to run your own hyperparameter search.
 

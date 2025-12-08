@@ -96,5 +96,5 @@ See [here](MODEL_ARTIFACTS_README.md).
 This work is based on the following repositories and tutorials:
 
 -   [Moondream](https://huggingface.co/vikhyatk/moondream2)
--   [Moondream Region Finetuning]([https://github.com/vikhyat/moondream/blob/main/moondream/finetune/finetune_region.py](https://github.com/vikhyat/moondream/blob/44146f139242dacdf7c02b799e68097424a31036/moondream/finetune/finetune_region.py))
+-   [Moondream Region Finetuning](https://github.com/vikhyat/moondream/blob/44146f139242dacdf7c02b799e68097424a31036/moondream/finetune/finetune_region.py)
 -   [GRPO Code](https://www.youtube.com/watch?v=yGkJj_4bjpE)

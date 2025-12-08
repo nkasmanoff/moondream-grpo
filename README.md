@@ -4,6 +4,14 @@ A repository for fine-tuning Moondream vision-language models using supervised a
 
 These trainers are focused on improving the model's ability to detect and localize objects in images, but in the future we can add the other tasks Moondream can do.
 
+So far using this codebase, I've been able to improve the model's f1 score on a held out test set of detecting basketball players by 11%.
+
+## Sample Results
+
+| Before                       | After                      |
+| ---------------------------- | -------------------------- |
+| ![Before](assets/before.png) | ![After](assets/after.png) |
+
 ### Warning:
 
 This code works best for Moondream 2, and the teacher forced trainer (`sft_trainer.py`).
@@ -67,66 +75,21 @@ python grpo_trainer.py
 python grpo_trainer.py --learning_rate=5e-5 --batch_size=5 --num_rollouts=5 --num_epochs=3
 ```
 
-## Loading LoRA adapters trained with `sft_trainer.py`
+## Hyperparameter Search
 
-The SFT trainer in `sft_trainer.py` can fine-tune Moondream-2 using LoRA adapters implemented in `trainer_helpers.py` (via the `LoRALinear` wrapper).
+The following shell script runs a hyperparameter search for the `sft_trainer.py` script:
 
-When you run `sft_trainer.py` with `use_lora=True`, it will save LoRA-only checkpoints such as:
-
--   **Best checkpoint**: `moondream_lora_best_step_{STEP}.safetensors`
--   **Final checkpoint**: `moondream_lora_finetune.safetensors`
-
-To load these adapters for inference:
-
-1. **Load the base Moondream-2 model and weights** (same as training):
-
-```python
-import torch
-from safetensors.torch import load_file
-
-from moondream2.moondream import MoondreamModel, MoondreamConfig
-from trainer_helpers import inject_lora_into_model, LoRALinear
-
-device = "cuda" if torch.cuda.is_available() else "mps"
-
-model = MoondreamModel(config=MoondreamConfig(), setup_caches=True)
-base_state = load_file("moondream2/model.safetensors")
-model.load_state_dict(base_state)
-model.to(device)
+```bash
+./run_hparam_sweep.sh
 ```
 
-2. **Inject LoRA layers with the same config used during training**:
+The results are logged to Weights & Biases, and makes it easy to determine which config is best for your dataset.
 
-```python
-LORA_RANK = 32
-LORA_ALPHA = 64
-LORA_DROPOUT = 0.1
-LORA_TARGET_MODULES = ["qkv", "proj", "fc1", "fc2"]
+Note that the `run_hparam_sweep.sh` script is just a wrapper around the `sft_trainer.py` script, so you can modify the script to run your own hyperparameter search.
 
-inject_lora_into_model(
-    model,
-    rank=LORA_RANK,
-    alpha=LORA_ALPHA,
-    dropout=LORA_DROPOUT,
-    target_modules=LORA_TARGET_MODULES,
-)
-```
+## Model Loading
 
-3. **Load the LoRA adapter weights** saved by the trainer:
-
-```python
-from safetensors.torch import load_file
-
-# For example, load the final LoRA checkpoint
-lora_state = load_file("moondream_lora_finetune.safetensors")
-
-# This will populate only the LoRA parameters (e.g. *.lora_A, *.lora_B)
-missing, unexpected = model.load_state_dict(lora_state, strict=False)
-print("Missing keys:", missing)
-print("Unexpected keys:", unexpected)
-```
-
-At this point, `model` is the base Moondream-2 model plus your trained LoRA adapters, and you can call the usual detection API (e.g. via `moondream2.moondream_functions.detect(model, image, object_str, settings, temperature=0.0)` or `model.detect(...)`) for inference. Because these adapters live inside `LoRALinear` wrappers from `trainer_helpers.py`, they must be loaded directly into the Python model as shown above.
+See [here](MODEL_ARTIFACTS_README.md).
 
 ## References
 

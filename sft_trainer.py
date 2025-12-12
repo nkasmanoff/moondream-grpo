@@ -488,23 +488,28 @@ def main(
     pbar.close()
 
     # Load and test the best model
-    logging.info(f"Loading best model from step {best_validation_step}")
-    if use_lora:
-        # Load best LoRA weights + region model
-        best_state_dict = load_file(
-            f"model_artifacts/moondream_lora_best_step_{best_validation_step}.safetensors"
-        )
-        model.load_state_dict(best_state_dict, strict=False)
-        logging.info(
-            f"Loaded best LoRA adapter + region model from step {best_validation_step}"
-        )
+    if best_validation_step > 0:
+        logging.info(f"Loading best model from step {best_validation_step}")
+        if use_lora:
+            # Load best LoRA weights + region model
+            best_state_dict = load_file(
+                f"model_artifacts/moondream_lora_best_step_{best_validation_step}.safetensors"
+            )
+            model.load_state_dict(best_state_dict, strict=False)
+            logging.info(
+                f"Loaded best LoRA adapter + region model from step {best_validation_step}"
+            )
+        else:
+            # Load best full model
+            best_state_dict = load_file(
+                f"model_artifacts/moondream_best_step_{best_validation_step}.safetensors"
+            )
+            model.load_state_dict(best_state_dict)
+            logging.info(f"Loaded best full model from step {best_validation_step}")
     else:
-        # Load best full model
-        best_state_dict = load_file(
-            f"model_artifacts/moondream_best_step_{best_validation_step}.safetensors"
+        logging.info(
+            "Skipping best model load: best_validation_step is 0 (no improvement over initial validation)"
         )
-        model.load_state_dict(best_state_dict)
-        logging.info(f"Loaded best full model from step {best_validation_step}")
 
     # Run final test on the best model
     model.eval()

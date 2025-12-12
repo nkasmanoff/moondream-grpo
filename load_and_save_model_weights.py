@@ -5,7 +5,7 @@ This script downloads the moondream2 model from HuggingFace and saves the model
 weights to a local safetensors file that can be used for training and inference.
 """
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 from PIL import Image
 from safetensors.torch import save_file
 

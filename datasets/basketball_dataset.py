@@ -129,7 +129,7 @@ class BasketballCocoDataset(Dataset):
 
 
 class BasketballDetection(Dataset):
-    def __init__(self, split: str = "train", categories_to_use=["ball"]):
+    def __init__(self, split: str = "train", categories_to_use=["player"]):
         """Wrapper for basketball dataset to match SFT trainer format"""
         self.categories_to_use = categories_to_use
         dataset_root = "datasets/basketball-player-detection-3.v1i.coco"

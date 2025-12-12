@@ -22,7 +22,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 2: Lower learning rate
 echo ""
@@ -37,7 +37,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 3: Higher learning rate
 echo ""
@@ -52,7 +52,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 4: Very low learning rate
 echo ""
@@ -67,7 +67,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 5: Lower LoRA rank
 echo ""
@@ -82,7 +82,7 @@ python sft_trainer.py \
     --lora_rank=16 \
     --lora_alpha=32 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 6: Higher LoRA rank
 echo ""
@@ -97,7 +97,7 @@ python sft_trainer.py \
     --lora_rank=64 \
     --lora_alpha=128 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 7: Very high LoRA rank
 echo ""
@@ -112,7 +112,7 @@ python sft_trainer.py \
     --lora_rank=128 \
     --lora_alpha=256 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 8: More epochs
 echo ""
@@ -127,7 +127,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 9: Fewer epochs, higher LR
 echo ""
@@ -142,7 +142,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 10: Lower gradient accumulation
 echo ""
@@ -157,7 +157,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 11: Higher gradient accumulation
 echo ""
@@ -172,7 +172,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 12: No LoRA dropout
 echo ""
@@ -187,7 +187,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.0 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 13: Higher LoRA dropout
 echo ""
@@ -202,7 +202,7 @@ python sft_trainer.py \
     --lora_rank=32 \
     --lora_alpha=64 \
     --lora_dropout=0.2 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 14: Lower LR + Higher rank
 echo ""
@@ -217,7 +217,7 @@ python sft_trainer.py \
     --lora_rank=64 \
     --lora_alpha=128 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection
 
 # Configuration 15: Higher LR + Lower rank
 echo ""
@@ -232,4 +232,4 @@ python sft_trainer.py \
     --lora_rank=16 \
     --lora_alpha=32 \
     --lora_dropout=0.1 \
-    --wandb_project=moondream-basketball-ft-sweep
+    --wandb_project=moondream-basketball-ft-sweep-player-detection

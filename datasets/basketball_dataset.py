@@ -1,3 +1,26 @@
+"""
+Categories available in the basketball-player-detection-3.v1i.coco dataset:
+ball	
+
+ball-in-basket	
+
+number	
+
+player	
+
+player-in-possession	
+
+player-jump-shot	
+
+player-layup-dunk	
+
+player-shot-block	
+
+referee	
+
+rim
+"""
+
 import json
 from pathlib import Path
 from PIL import Image
@@ -106,7 +129,7 @@ class BasketballCocoDataset(Dataset):
 
 
 class BasketballDetection(Dataset):
-    def __init__(self, split: str = "train", categories_to_use=["player"]):
+    def __init__(self, split: str = "train", categories_to_use=["ball"]):
         """Wrapper for basketball dataset to match SFT trainer format"""
         self.categories_to_use = categories_to_use
         dataset_root = "datasets/basketball-player-detection-3.v1i.coco"

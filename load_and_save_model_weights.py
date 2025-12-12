@@ -14,7 +14,7 @@ hf_model = AutoModelForCausalLM.from_pretrained(
     "vikhyatk/moondream2",
     revision="2025-06-21",
     trust_remote_code=True,
-    device_map={"": "mps"},  # ...or 'mps', on Apple Silicon
+    device_map={"": "cuda"},  # ...or 'mps', on Apple Silicon
 )
 
 # Setup model caches

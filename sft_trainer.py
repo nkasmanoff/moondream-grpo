@@ -240,16 +240,16 @@ def main(
     Main training function with configurable hyperparameters via Fire CLI.
 
     Args:
-        lr: Learning rate (default: 5e-6)
-        epochs: Number of training epochs (default: 3)
-        grad_accum_steps: Gradient accumulation steps (default: 32)
+        lr: Learning rate (default: 5e-5, optimal range: 5e-5 to 1e-4)
+        epochs: Number of training epochs (default: 5, optimal range: 3-5)
+        grad_accum_steps: Gradient accumulation steps (default: 64)
         validation_samples: Number of samples to use for validation (default: 250)
         eval_interval: Evaluate every N gradient accumulation steps (default: 5)
         overfit_batch_size: Set to > 0 to overfit on a tiny subset (default: None)
-        use_lora: Whether to use LoRA instead of full fine-tuning (default: False)
-        lora_rank: Rank of LoRA matrices (default: 32)
+        use_lora: Whether to use LoRA instead of full fine-tuning (default: True)
+        lora_rank: Rank of LoRA matrices (default: 32, optimal: 32 or 64)
         lora_alpha: Scaling factor for LoRA, typically 2x rank (default: 64)
-        lora_dropout: Dropout for LoRA layers (default: 0.1)
+        lora_dropout: Dropout for LoRA layers (default: 0.1, optimal: 0.0 or 0.1)
         lora_target_modules: Which layers to apply LoRA to (default: ["qkv", "proj", "fc1", "fc2"])
         model_path: Path to model safetensors file (default: "moondream2/model.safetensors")
         wandb_project: Weights & Biases project name (default: "moondream-basketball-ft")
